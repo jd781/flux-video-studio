@@ -3,18 +3,32 @@ import {
   DEFAULT_FLUX_PARAMS,
   INITIAL_TAKES,
   calculateCost,
-  calculateBatchUpscaleCost,
   generateRandomSeed,
   prepareExtendVideoState,
-  simulateFalVideoUpscale,
 } from './utils/fluxVideoUtils';
 import {
-  loadProjectsFromStorage,
-  saveProjectsToStorage,
+  generateVideo,
+  upscaleVideo,
+  enhanceDraft,
+  GenerationError,
+} from './lib/falClient';
+import { flux3EnhanceCost } from './utils/flux3';
+import { captureVideoThumbnail } from './utils/videoThumbnail';
+import { validateGeneration } from './utils/validateGeneration';
+import { GenerationNotice, GenerationNoticeData } from './components/GenerationNotice';
+import {
   createNewProject,
   duplicateProject,
   LAST_ACTIVE_PROJECT_KEY,
 } from './utils/projectUtils';
+import {
+  fetchSessions,
+  fetchTeamMembers,
+  createSessionRemote,
+  updateSessionRemote,
+  setSessionVisibilityRemote,
+  deleteSessionRemote,
+} from './lib/sessionsApi';
 import {
   AspectRatio,
   DurationSeconds,
@@ -24,6 +38,8 @@ import {
   BatchUpscaleState,
   VideoTake,
   FluxProject,
+  SessionVisibility,
+  TeamMember,
 } from './types/flux';
 import { Header } from './components/Header';
 import { ControlsPanel } from './components/ControlsPanel';
@@ -33,46 +49,39 @@ import { ActionBar } from './components/ActionBar';
 import { UpscaleBanner } from './components/UpscaleBanner';
 import { GenerationsGallery } from './components/GenerationsGallery';
 import { ProjectSessionModal, SessionModalView } from './components/ProjectSessionModal';
-import { CheckCircle2, AlertCircle, History, Sparkles, Layers, Grid } from 'lucide-react';
+import { UsageModal } from './components/UsageModal';
+import { AuthUser } from './lib/auth';
+import { CheckCircle2, AlertCircle, History, Sparkles, Layers, Grid, ChevronDown, ChevronUp } from 'lucide-react';
 
-export default function App() {
-  // Saved Projects in Save Folder
-  const [projects, setProjects] = useState<FluxProject[]>(() => loadProjectsFromStorage());
+interface AppProps {
+  currentUser: AuthUser;
+}
+
+export default function App({ currentUser }: AppProps) {
+  // Server-backed sessions (studios). Loaded from the API on mount.
+  const [projects, setProjects] = useState<FluxProject[]>([]);
+  const [sessionsLoaded, setSessionsLoaded] = useState<boolean>(false);
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState<string>(() => {
     if (typeof window !== 'undefined') {
-      const savedLastId = localStorage.getItem(LAST_ACTIVE_PROJECT_KEY);
-      if (savedLastId) return savedLastId;
+      return localStorage.getItem(LAST_ACTIVE_PROJECT_KEY) || '';
     }
-    return 'proj-001';
+    return '';
   });
 
   // App Startup Greeting & Saved Sessions Modal
-  // Greets user on app startup with option to create new session or open a saved session
   const [isSessionModalOpen, setIsSessionModalOpen] = useState<boolean>(true);
   const [sessionModalView, setSessionModalView] = useState<SessionModalView>('welcome');
 
-  // Active Project Reference
-  const initialActiveProject =
-    projects.find((p) => p.id === currentProjectId) || projects[0];
+  // Active studio working state. Starts from defaults; hydrated when a session
+  // is opened or loaded from the server.
+  const [params, setParams] = useState<FluxGenerationParams>(DEFAULT_FLUX_PARAMS);
+  const [takes, setTakes] = useState<VideoTake[]>([]);
+  const [currentTake, setCurrentTake] = useState<VideoTake | null>(null);
 
-  const [params, setParams] = useState<FluxGenerationParams>(
-    initialActiveProject?.params || DEFAULT_FLUX_PARAMS
-  );
-  const [takes, setTakes] = useState<VideoTake[]>(
-    initialActiveProject?.takes || INITIAL_TAKES
-  );
-  const [currentTake, setCurrentTake] = useState<VideoTake | null>(() => {
-    if (initialActiveProject && initialActiveProject.takes.length > 0) {
-      return (
-        initialActiveProject.takes.find((t) => t.id === initialActiveProject.currentTakeId) ||
-        initialActiveProject.takes[0]
-      );
-    }
-    return INITIAL_TAKES[0];
-  });
-
-  const [userCredits, setUserCredits] = useState<number>(10625); // ~$42.50
   const [currentView, setCurrentView] = useState<'studio' | 'gallery'>('studio');
+  // Persistent pre-flight / failure card (stays until dismissed, unlike a toast).
+  const [notice, setNotice] = useState<GenerationNoticeData | null>(null);
   const [toastMessage, setToastMessage] = useState<{
     text: string;
     type: 'success' | 'info' | 'error';
@@ -105,7 +114,8 @@ export default function App() {
     etaSeconds: 0,
   });
 
-  const generationTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // Holds the AbortController for an in-flight fal.ai generation so it can be cancelled.
+  const generationAbortRef = useRef<AbortController | null>(null);
 
   // Clear toast after timeout
   useEffect(() => {
@@ -122,33 +132,97 @@ export default function App() {
   const activeProject =
     projects.find((p) => p.id === currentProjectId) || projects[0];
 
-  // Auto-Save Effect: Automatically saves the project and all its generations to the save folder
+  // Load this user's sessions (owned + team + shared-with-them) + team members.
+  useEffect(() => {
+    let active = true;
+    Promise.all([fetchSessions(), fetchTeamMembers()])
+      .then(([sessions, members]) => {
+        if (!active) return;
+        setTeamMembers(members);
+        setProjects(sessions);
+        // Pick the last-active session if still visible, else the newest.
+        const lastId =
+          typeof window !== 'undefined'
+            ? localStorage.getItem(LAST_ACTIVE_PROJECT_KEY)
+            : null;
+        const target =
+          sessions.find((s) => s.id === lastId) || sessions[0] || null;
+        if (target) {
+          setCurrentProjectId(target.id);
+          setParams(target.params);
+          setTakes(target.takes);
+          setCurrentTake(
+            target.takes.find((t) => t.id === target.currentTakeId) ||
+              target.takes[0] ||
+              null
+          );
+        }
+        setSessionsLoaded(true);
+      })
+      .catch((err) => {
+        console.error('[sessions] load failed:', err);
+        setSessionsLoaded(true);
+        showToast('Could not load your sessions.', 'error');
+      });
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Auto-Save Effect: debounced persist of the active session to the server.
   const isInitialMount = useRef(true);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (isInitialMount.current) {
       isInitialMount.current = false;
       return;
     }
+    if (!sessionsLoaded || !currentProjectId) return;
 
-    setProjects((prevProjects) => {
-      const updated = prevProjects.map((p) => {
-        if (p.id === currentProjectId) {
-          return {
-            ...p,
-            params,
-            takes,
-            currentTakeId: currentTake?.id || null,
-            thumbnailUrl:
-              takes.length > 0 ? takes[0].posterUrl : p.params.startFrameUrl || undefined,
-            updatedAt: Date.now(),
-          };
-        }
-        return p;
-      });
-      saveProjectsToStorage(updated);
-      return updated;
-    });
-  }, [params, takes, currentTake, currentProjectId]);
+    // Update local copy immediately for snappy UI.
+    const thumbnailUrl =
+      takes.length > 0 ? takes[0].posterUrl : params.startFrameUrl || undefined;
+    setProjects((prev) =>
+      prev.map((p) =>
+        p.id === currentProjectId
+          ? {
+              ...p,
+              params,
+              takes,
+              currentTakeId: currentTake?.id || null,
+              thumbnailUrl,
+              updatedAt: Date.now(),
+            }
+          : p
+      )
+    );
+
+    // Debounce the network save (generations mutate state rapidly).
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      const current = projectsRef.current.find((p) => p.id === currentProjectId);
+      if (!current) return;
+      updateSessionRemote({
+        ...current,
+        params,
+        takes,
+        currentTakeId: currentTake?.id || null,
+        thumbnailUrl,
+      }).catch((err) => console.error('[sessions] save failed:', err));
+    }, 800);
+
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params, takes, currentTake, currentProjectId, sessionsLoaded]);
+
+  // Keep a ref of the latest projects for the debounced save closure.
+  const projectsRef = useRef<FluxProject[]>(projects);
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
 
   // Project Management Actions
   const handleOpenProject = (projectId: string) => {
@@ -165,61 +239,128 @@ export default function App() {
     if (typeof window !== 'undefined') {
       localStorage.setItem(LAST_ACTIVE_PROJECT_KEY, target.id);
     }
-    showToast(`Loaded project session "${target.title}"`, 'success');
+    showToast(`Loaded session "${target.title}"`, 'success');
   };
 
-  const handleCreateProject = (
+  const handleCreateProject = async (
     title: string,
     template?: Partial<FluxGenerationParams>,
     folder?: string
   ) => {
-    const newProj = createNewProject(title, template, folder);
-    const updated = [newProj, ...projects];
-    setProjects(updated);
-    saveProjectsToStorage(updated);
-
-    setCurrentProjectId(newProj.id);
-    setParams(newProj.params);
-    setTakes(newProj.takes);
+    const draft = createNewProject(title, template, folder);
+    // Mark as owned/private locally; server is the source of truth.
+    const local: FluxProject = {
+      ...draft,
+      ownerEmail: currentUser.email,
+      visibility: 'private',
+      sharedWith: [],
+      isOwner: true,
+    };
+    setProjects((prev) => [local, ...prev]);
+    setCurrentProjectId(local.id);
+    setParams(local.params);
+    setTakes(local.takes);
     setCurrentTake(null);
-
     if (typeof window !== 'undefined') {
-      localStorage.setItem(LAST_ACTIVE_PROJECT_KEY, newProj.id);
+      localStorage.setItem(LAST_ACTIVE_PROJECT_KEY, local.id);
     }
     setCurrentView('studio');
-    showToast(`Created new project session "${newProj.title}"`, 'success');
+
+    try {
+      const saved = await createSessionRemote(local);
+      setProjects((prev) => prev.map((p) => (p.id === saved.id ? saved : p)));
+      showToast(`Created session "${saved.title}"`, 'success');
+    } catch (err) {
+      console.error('[sessions] create failed:', err);
+      showToast('Could not create session on the server.', 'error');
+    }
   };
 
-  const handleDuplicateProject = (project: FluxProject) => {
+  const handleDuplicateProject = async (project: FluxProject) => {
     const copy = duplicateProject(project);
-    const updated = [copy, ...projects];
-    setProjects(updated);
-    saveProjectsToStorage(updated);
-    showToast(`Duplicated "${project.title}" to save folder`, 'success');
+    const local: FluxProject = {
+      ...copy,
+      ownerEmail: currentUser.email,
+      visibility: 'private',
+      sharedWith: [],
+      isOwner: true,
+    };
+    setProjects((prev) => [local, ...prev]);
+    try {
+      const saved = await createSessionRemote(local);
+      setProjects((prev) => prev.map((p) => (p.id === saved.id ? saved : p)));
+      showToast(`Duplicated "${project.title}"`, 'success');
+    } catch (err) {
+      console.error('[sessions] duplicate failed:', err);
+      showToast('Could not duplicate session.', 'error');
+    }
   };
 
-  const handleDeleteProject = (projectId: string) => {
-    if (projects.length <= 1) {
-      showToast('Cannot delete the only remaining project session', 'error');
+  const handleDeleteProject = async (projectId: string) => {
+    const target = projects.find((p) => p.id === projectId);
+    if (target && target.isOwner === false) {
+      showToast('Only the owner can delete this session.', 'error');
       return;
     }
-    const updated = projects.filter((p) => p.id !== projectId);
-    setProjects(updated);
-    saveProjectsToStorage(updated);
-
-    if (currentProjectId === projectId) {
-      handleOpenProject(updated[0].id);
+    const remaining = projects.filter((p) => p.id !== projectId);
+    setProjects(remaining);
+    if (currentProjectId === projectId && remaining[0]) {
+      handleOpenProject(remaining[0].id);
+    } else if (remaining.length === 0) {
+      setCurrentProjectId('');
+      setTakes([]);
+      setCurrentTake(null);
     }
-    showToast('Project removed from save folder', 'info');
+    try {
+      await deleteSessionRemote(projectId);
+      showToast('Session deleted.', 'info');
+    } catch (err) {
+      console.error('[sessions] delete failed:', err);
+      showToast('Could not delete session.', 'error');
+    }
   };
 
   const handleRenameProject = (projectId: string, newTitle: string) => {
-    const updated = projects.map((p) =>
-      p.id === projectId ? { ...p, title: newTitle, updatedAt: Date.now() } : p
+    setProjects((prev) =>
+      prev.map((p) =>
+        p.id === projectId ? { ...p, title: newTitle, updatedAt: Date.now() } : p
+      )
     );
-    setProjects(updated);
-    saveProjectsToStorage(updated);
-    showToast(`Project renamed to "${newTitle}"`, 'success');
+    const target = projects.find((p) => p.id === projectId);
+    if (target) {
+      updateSessionRemote({ ...target, title: newTitle }).catch((err) =>
+        console.error('[sessions] rename failed:', err)
+      );
+    }
+    showToast(`Renamed to "${newTitle}"`, 'success');
+  };
+
+  // Change a session's visibility / sharing (owner only).
+  const handleChangeVisibility = async (
+    projectId: string,
+    visibility: SessionVisibility,
+    sharedWith: string[]
+  ) => {
+    try {
+      const saved = await setSessionVisibilityRemote(
+        projectId,
+        visibility,
+        sharedWith
+      );
+      setProjects((prev) => prev.map((p) => (p.id === saved.id ? saved : p)));
+      const label =
+        visibility === 'private'
+          ? 'Private'
+          : visibility === 'team'
+          ? 'Shared with the team'
+          : `Shared with ${sharedWith.length} ${
+              sharedWith.length === 1 ? 'person' : 'people'
+            }`;
+      showToast(`Visibility: ${label}`, 'success');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to update sharing.';
+      showToast(msg, 'error');
+    }
   };
 
   const handleUpdateParams = (newParams: Partial<FluxGenerationParams>) => {
@@ -241,166 +382,299 @@ export default function App() {
     showToast(`Loaded "${preset.title}" preset`, 'info');
   };
 
-  // Cost calculation
+  // Cost calculation (estimate; server records the authoritative figure)
   const currentCost = calculateCost(
+    params.modelId,
     params.duration,
     params.qualityTier,
-    params.nativeAudio,
-    params.inferenceSteps
+    { workflowMode: params.workflowMode, resolution: params.resolution }
   );
 
-  // Generate Video Flow
-  const handleGenerate = () => {
+  // Captures a real first-frame thumbnail from a video and patches the take's
+  // posterUrl (both in the takes list and currentTake if selected).
+  const captureAndApplyThumbnail = async (takeId: string, videoUrl: string) => {
+    const thumb = await captureVideoThumbnail(videoUrl);
+    if (!thumb) return;
+    setTakes((prev) =>
+      prev.map((t) => (t.id === takeId ? { ...t, posterUrl: thumb } : t))
+    );
+    setCurrentTake((prev) =>
+      prev && prev.id === takeId ? { ...prev, posterUrl: thumb } : prev
+    );
+  };
+
+  // A pre-flight notice is stale as soon as the user changes anything.
+  useEffect(() => {
+    setNotice((n) => (n && n.kind === 'preflight' ? null : n));
+  }, [params]);
+
+  // Show a failure with its reason and suggested fix (persistent card + short toast).
+  const reportFailure = (err: unknown, what: 'Generation' | 'Upscale' | 'Enhance') => {
+    if (err instanceof GenerationError) {
+      setNotice({
+        kind: 'failed',
+        title: `${what} failed`,
+        message: err.message,
+        hint: err.hint,
+        detail: err.detail,
+      });
+      showToast(`${what} failed: ${err.message}`, 'error');
+    } else {
+      const message = err instanceof Error ? err.message : 'Something went wrong.';
+      setNotice({
+        kind: 'failed',
+        title: `${what} failed`,
+        message,
+        hint: 'Try again. If it keeps happening, contact the admin.',
+      });
+      showToast(`${what} failed: ${message}`, 'error');
+    }
+  };
+
+  // Generate Video Flow — real fal.ai Seedance call.
+  // NOTE: this is bound to a button's onClick, which passes the click event as the
+  // first argument, so the "proceed anyway" flag must be an explicit named option.
+  const handleGenerate = async (opts?: { ignoreWarnings?: boolean }) => {
     if (queueStatus.isGenerating) return;
 
-    if (!params.prompt.trim()) {
-      showToast('Please enter a scene prompt before generating', 'error');
+    // Pre-flight: catch missing/invalid inputs BEFORE anything is submitted.
+    const check = validateGeneration(params);
+    if (
+      check.errors.length > 0 ||
+      (check.warnings.length > 0 && opts?.ignoreWarnings !== true)
+    ) {
+      setNotice({
+        kind: 'preflight',
+        errors: check.errors,
+        warnings: check.warnings,
+      });
       return;
     }
+    setNotice(null);
 
-    if (userCredits < currentCost.credits) {
-      showToast('Insufficient compute credits for this tier', 'error');
-      return;
+    // Ensure there's an active session to attach the generation to.
+    if (!currentProjectId) {
+      await handleCreateProject('Untitled Session');
     }
 
-    // Initialize Generation Simulation
     const totalSteps = params.inferenceSteps;
-    const estTimeSec = Math.max(4, Math.round(params.duration * 0.8 + (params.inferenceSteps / 15)));
+    const abortController = new AbortController();
+    generationAbortRef.current = abortController;
 
     setQueueStatus({
       isGenerating: true,
-      progressPercent: 0,
+      progressPercent: 2,
       currentStep: 0,
       totalSteps,
       phase: 'queued',
-      statusMessage: 'Queueing generation task on FLUX cluster...',
-      etaSeconds: estTimeSec,
-    });
-
-    let currentProgress = 0;
-    const startTime = Date.now();
-    const totalDurationMs = 3800; // Simulated smooth render pass
-    const intervalMs = 150;
-
-    generationTimerRef.current = setInterval(() => {
-      const elapsed = Date.now() - startTime;
-      currentProgress = Math.min(100, (elapsed / totalDurationMs) * 100);
-
-      const step = Math.min(totalSteps, Math.floor((currentProgress / 100) * totalSteps));
-      const remainingSec = Math.max(0, Math.ceil((1 - currentProgress / 100) * estTimeSec));
-
-      let phase: GenerationQueueStatus['phase'] = 'denoising';
-      let message = `Denoising latent video tensor • Step ${step}/${totalSteps}`;
-
-      if (currentProgress < 15) {
-        phase = 'queued';
-        message = 'Allocating H100 GPU worker (24GB VRAM)...';
-      } else if (currentProgress < 30) {
-        phase = 'vram_allocation';
-        message = 'Loading FLUX.1 DiT weights & spatio-temporal latents...';
-      } else if (currentProgress < 75) {
-        phase = 'denoising';
-        message = `Synthesizing motion vectors • Step ${step}/${totalSteps}`;
-      } else if (params.nativeAudio && currentProgress < 90) {
-        phase = 'audio_synthesis';
-        message = 'Synthesizing native synchronized audio track...';
-      } else {
-        phase = 'encoding';
-        message = 'Encoding high-bitrate MP4 container...';
-      }
-
-      setQueueStatus({
-        isGenerating: true,
-        progressPercent: currentProgress,
-        currentStep: step,
-        totalSteps,
-        phase,
-        statusMessage: message,
-        etaSeconds: remainingSec,
-      });
-
-      if (currentProgress >= 100) {
-        if (generationTimerRef.current) clearInterval(generationTimerRef.current);
-
-        // Pick suitable video sample based on aspect ratio & duration
-        const sampleVideoUrls = [
-          'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
-          'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4',
-          'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4',
-        ];
-        const chosenUrl = sampleVideoUrls[takes.length % sampleVideoUrls.length];
-        const posterUrl =
-          params.startFrameUrl ||
-          (params.keyframes.length > 0 ? params.keyframes[0].imageUrl : INITIAL_TAKES[0].posterUrl);
-
-        const resolution = params.qualityTier === 'draft' ? '480p' : '1080p';
-        const newTake: VideoTake = {
-          id: `take-${Date.now()}`,
-          createdAt: Date.now(),
-          title: `Take ${takes.length + 1} • ${resolution} (${params.workflowMode.replace(/_/g, ' ').toUpperCase()})`,
-          videoUrl: chosenUrl,
-          posterUrl,
-          duration: params.duration,
-          aspectRatio: params.aspectRatio,
-          qualityTier: params.qualityTier,
-          resolution,
-          prompt: params.prompt,
-          params: { ...params },
-          hasAudio: params.nativeAudio,
-          costEstimate: currentCost.dollars,
-        };
-
-        setTakes((prev) => [newTake, ...prev]);
-        setCurrentTake(newTake);
-        setUserCredits((prev) => Math.max(0, prev - currentCost.credits));
-
-        setQueueStatus({
-          isGenerating: false,
-          progressPercent: 100,
-          currentStep: totalSteps,
-          totalSteps,
-          phase: 'completed',
-          statusMessage: 'Completed',
-          etaSeconds: 0,
-        });
-
-        showToast(`Video synthesized successfully! Deducted ${currentCost.credits} credits.`, 'success');
-      }
-    }, intervalMs);
-  };
-
-  // Upscale Workflow (fal-ai/video-upscaler or Topaz)
-  const handleUpscale = async (targetResolution: '1080p' | '4K') => {
-    if (!currentTake || upscaleState.isUpscaling) return;
-
-    setUpscaleState({
-      isUpscaling: true,
-      takeId: currentTake.id,
-      targetResolution,
-      progressPercent: 12,
-      stepMessage: 'Submitting draft (480p) to fal-ai/video-upscaler...',
+      statusMessage: 'Uploading media & submitting to fal.ai Seedance...',
+      etaSeconds: Math.max(10, params.duration * 3),
     });
 
     try {
-      const upscaledTake = await simulateFalVideoUpscale(
-        currentTake,
+      const result = await generateVideo(
+        params,
+        (p) => {
+          setQueueStatus((prev) => ({
+            ...prev,
+            isGenerating: true,
+            progressPercent: p.percent,
+            currentStep: Math.round((p.percent / 100) * totalSteps),
+            totalSteps,
+            phase: p.phase,
+            statusMessage: p.message,
+            etaSeconds: Math.max(0, Math.round(((100 - p.percent) / 100) * params.duration * 3)),
+          }));
+        },
+        abortController.signal
+      );
+
+      const posterUrl =
+        params.startFrameUrl ||
+        (params.keyframes.length > 0
+          ? params.keyframes[0].imageUrl
+          : INITIAL_TAKES[0].posterUrl);
+
+      const isFlux3Draft =
+        params.modelId === 'flux-3' && params.qualityTier === 'draft';
+
+      const newTake: VideoTake = {
+        id: `take-${Date.now()}`,
+        createdAt: Date.now(),
+        title: `Take ${takes.length + 1} • ${result.resolution}${
+          isFlux3Draft ? ' Draft' : ''
+        } (${params.workflowMode.replace(/_/g, ' ').toUpperCase()})`,
+        videoUrl: result.videoUrl,
+        posterUrl,
+        duration: params.duration,
+        aspectRatio: params.aspectRatio,
+        qualityTier: params.qualityTier,
+        resolution: result.resolution,
+        prompt: params.prompt,
+        params: { ...params, seed: result.seed },
+        hasAudio: params.nativeAudio,
+        costEstimate: currentCost.dollars,
+        // FLUX 3 drafts keep their cache so they can be enhanced later.
+        draftCacheUrl: result.draftCacheUrl ?? undefined,
+      };
+
+      setTakes((prev) => [newTake, ...prev]);
+      setCurrentTake(newTake);
+
+      // Capture a real thumbnail from the generated video's first frame and
+      // patch it in once ready (falls back to the placeholder poster on failure).
+      void captureAndApplyThumbnail(newTake.id, newTake.videoUrl);
+
+      setQueueStatus({
+        isGenerating: false,
+        progressPercent: 100,
+        currentStep: totalSteps,
+        totalSteps,
+        phase: 'completed',
+        statusMessage: 'Completed',
+        etaSeconds: 0,
+      });
+
+      showToast('Video generated successfully via fal.ai Seedance!', 'success');
+    } catch (err) {
+      const aborted =
+        abortController.signal.aborted ||
+        (err instanceof Error && /abort/i.test(err.message));
+      setQueueStatus({
+        isGenerating: false,
+        progressPercent: 0,
+        currentStep: 0,
+        totalSteps,
+        phase: aborted ? 'idle' : 'failed',
+        statusMessage: aborted ? 'Generation cancelled' : 'Generation failed',
+        etaSeconds: 0,
+      });
+      if (!aborted) {
+        reportFailure(err, 'Generation');
+        console.error('[fal generate] error:', err);
+      }
+    } finally {
+      generationAbortRef.current = null;
+    }
+  };
+
+  // Upscale Workflow — real fal.ai Topaz video upscaler.
+  const handleUpscale = async (targetResolution: '1080p' | '4K') => {
+    if (!currentTake || upscaleState.isUpscaling) return;
+
+    const sourceTake = currentTake;
+
+    setUpscaleState({
+      isUpscaling: true,
+      takeId: sourceTake.id,
+      targetResolution,
+      progressPercent: 5,
+      stepMessage: 'Submitting to fal-ai/topaz video upscaler...',
+    });
+
+    try {
+      const { videoUrl } = await upscaleVideo(
+        sourceTake.videoUrl,
         targetResolution,
-        (percent, stepMessage) => {
+        (p) => {
           setUpscaleState((prev) => ({
             ...prev,
-            progressPercent: percent,
-            stepMessage,
+            progressPercent: p.percent,
+            stepMessage: p.message,
           }));
         }
       );
 
-      // Swap video player source to the newly upscaled video URL
-      // Retain original draft video in session history
+      const upscaledTake: VideoTake = {
+        ...sourceTake,
+        id: `take-upscaled-${Date.now()}`,
+        createdAt: Date.now(),
+        title: `${sourceTake.title.replace(/\[.*\]/, '').trim()} [${targetResolution}]`,
+        videoUrl,
+        qualityTier: 'final',
+        resolution: targetResolution,
+        upscaledFromId: sourceTake.id,
+        upscaleDetails: {
+          model: 'fal-ai/topaz/upscale/video',
+          targetResolution,
+          upscaledAt: Date.now(),
+        },
+      };
+
+      // Keep the original take in history; add the upscaled one and select it.
       setTakes((prev) => [upscaledTake, ...prev]);
       setCurrentTake(upscaledTake);
-      showToast(`Upscaled to ${targetResolution} HD via fal-ai/video-upscaler!`, 'success');
+      void captureAndApplyThumbnail(upscaledTake.id, upscaledTake.videoUrl);
+      showToast(`Upscaled to ${targetResolution} via fal-ai/topaz!`, 'success');
     } catch (err) {
-      showToast('Upscaling failed. Please try again.', 'error');
+      reportFailure(err, 'Upscale');
+      console.error('[fal upscale] error:', err);
+    } finally {
+      setUpscaleState({
+        isUpscaling: false,
+        takeId: null,
+        targetResolution: '1080p',
+        progressPercent: 0,
+        stepMessage: '',
+      });
+    }
+  };
+
+  // FLUX 3 Draft Enhance: re-render the approved draft at full quality from its
+  // cache (same motion, no re-planning). Reuses the upscale progress state.
+  const handleEnhance = async () => {
+    const source = currentTake;
+    if (!source?.draftCacheUrl || upscaleState.isUpscaling) return;
+
+    setUpscaleState({
+      isUpscaling: true,
+      takeId: source.id,
+      targetResolution: '1080p',
+      progressPercent: 5,
+      stepMessage: 'Enhancing draft to full-quality 1080p...',
+    });
+
+    try {
+      const { videoUrl, costUsd } = await enhanceDraft(
+        source.draftCacheUrl,
+        source.duration,
+        source.params.safetyTolerance,
+        (p) => {
+          setUpscaleState((prev) => ({
+            ...prev,
+            progressPercent: p.percent,
+            stepMessage: p.message,
+          }));
+        }
+      );
+
+      const enhanced: VideoTake = {
+        ...source,
+        id: `take-enhanced-${Date.now()}`,
+        createdAt: Date.now(),
+        title: `${source.title.replace(' Draft', '')} [1080p Enhanced]`,
+        videoUrl,
+        draftCacheUrl: undefined,
+        qualityTier: 'final',
+        resolution: '1080p',
+        params: { ...source.params, qualityTier: 'final' },
+        costEstimate: costUsd,
+        upscaledFromId: source.id,
+        upscaleDetails: {
+          model: 'blackforestlabs/flux-3/draft-enhance',
+          targetResolution: '1080p',
+          upscaledAt: Date.now(),
+        },
+      };
+
+      // Keep the draft in history; add the enhanced take and select it.
+      setTakes((prev) => [enhanced, ...prev]);
+      setCurrentTake(enhanced);
+      void captureAndApplyThumbnail(enhanced.id, enhanced.videoUrl);
+      showToast('Draft enhanced to full-quality 1080p!', 'success');
+    } catch (err) {
+      reportFailure(err, 'Enhance');
+      console.error('[fal enhance] error:', err);
     } finally {
       setUpscaleState({
         isUpscaling: false,
@@ -455,7 +729,7 @@ export default function App() {
     if (!currentTake) return;
     const link = document.createElement('a');
     link.href = currentTake.videoUrl;
-    link.download = `FLUX_Take_${currentTake.id}_${currentTake.aspectRatio.replace(':', 'x')}.mp4`;
+    link.download = `52VideoStudio_Take_${currentTake.id}_${currentTake.aspectRatio.replace(':', 'x')}.mp4`;
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
     document.body.appendChild(link);
@@ -464,10 +738,10 @@ export default function App() {
     showToast(`Downloading ${currentTake.title} (.mp4)`, 'success');
   };
 
-  // Cancel generation
+  // Cancel generation — aborts the in-flight fal.ai request.
   const handleCancel = () => {
-    if (generationTimerRef.current) {
-      clearInterval(generationTimerRef.current);
+    if (generationAbortRef.current) {
+      generationAbortRef.current.abort();
     }
     setQueueStatus({
       isGenerating: false,
@@ -502,21 +776,12 @@ export default function App() {
     );
   };
 
-  // Batch Upscale Queue Workflow (fal-ai/video-upscaler)
+  // Batch Upscale Queue Workflow — real fal.ai Topaz upscaler, one take at a time.
   const handleBatchUpscale = async (
     takeIds: string[],
     targetResolution: '1080p' | '4K'
   ) => {
     if (takeIds.length === 0 || batchUpscaleState.isProcessing) return;
-
-    const batchCost = calculateBatchUpscaleCost(takeIds.length, targetResolution);
-    if (userCredits < batchCost.credits) {
-      showToast(
-        `Insufficient compute credits for batch upscale (${batchCost.credits} credits required)`,
-        'error'
-      );
-      return;
-    }
 
     setBatchUpscaleState({
       isProcessing: true,
@@ -533,6 +798,7 @@ export default function App() {
     );
 
     let completed = 0;
+    let failed = 0;
     for (let i = 0; i < takeIds.length; i++) {
       const targetId = takeIds[i];
       setBatchUpscaleState((prev) => ({
@@ -541,12 +807,17 @@ export default function App() {
         activeTakeId: targetId,
       }));
 
-      // Find current draft take
       const targetTake = takes.find((t) => t.id === targetId);
       if (targetTake) {
         try {
-          const upscaled = await simulateFalVideoUpscale(targetTake, targetResolution);
+          const { videoUrl } = await upscaleVideo(targetTake.videoUrl, targetResolution);
           completed += 1;
+
+          const upscaleDetails = {
+            model: 'fal-ai/topaz/upscale/video',
+            targetResolution,
+            upscaledAt: Date.now(),
+          };
 
           // Replace take in place: update resolution, badge, URL, and upscale details
           setTakes((prev) =>
@@ -557,9 +828,8 @@ export default function App() {
                     title: `${t.title.replace(/\[.*\]/, '').trim()} [${targetResolution}]`,
                     resolution: targetResolution,
                     qualityTier: 'final',
-                    videoUrl: upscaled.videoUrl,
-                    costEstimate: upscaled.costEstimate,
-                    upscaleDetails: upscaled.upscaleDetails,
+                    videoUrl,
+                    upscaleDetails,
                   }
                 : t
             )
@@ -573,9 +843,8 @@ export default function App() {
                     title: `${prev.title.replace(/\[.*\]/, '').trim()} [${targetResolution}]`,
                     resolution: targetResolution,
                     qualityTier: 'final',
-                    videoUrl: upscaled.videoUrl,
-                    costEstimate: upscaled.costEstimate,
-                    upscaleDetails: upscaled.upscaleDetails,
+                    videoUrl,
+                    upscaleDetails,
                   }
                 : null
             );
@@ -586,12 +855,11 @@ export default function App() {
             completedCount: completed,
           }));
         } catch (err) {
+          failed += 1;
           console.error(`Failed to upscale ${targetId}`, err);
         }
       }
     }
-
-    setUserCredits((prev) => Math.max(0, prev - batchCost.credits));
 
     setBatchUpscaleState({
       isProcessing: false,
@@ -603,8 +871,10 @@ export default function App() {
     });
 
     showToast(
-      `Batch upscale complete! ${completed} of ${takeIds.length} videos converted to ${targetResolution} HD.`,
-      'success'
+      failed > 0
+        ? `Batch upscale finished: ${completed} succeeded, ${failed} failed.`
+        : `Batch upscale complete! ${completed} videos converted to ${targetResolution}.`,
+      failed > 0 ? 'info' : 'success'
     );
   };
 
@@ -618,13 +888,16 @@ export default function App() {
   };
 
   const [mobileTab, setMobileTab] = useState<'controls' | 'stage'>('controls');
+  const [isHistoryCollapsed, setIsHistoryCollapsed] = useState<boolean>(false);
+  const [isUsageOpen, setIsUsageOpen] = useState<boolean>(false);
 
   return (
     <div className="h-screen bg-[#09090b] text-neutral-100 flex flex-col select-none antialiased overflow-hidden">
       {/* Studio Header with View Switcher & Session Manager */}
       <Header
         onLoadPreset={handleLoadPreset}
-        userCredits={userCredits}
+        currentUser={currentUser}
+        onOpenUsage={() => setIsUsageOpen(true)}
         currentView={currentView}
         onChangeView={setCurrentView}
         takesCount={takes.length}
@@ -708,45 +981,85 @@ export default function App() {
                 mobileTab === 'stage' ? 'flex' : 'hidden lg:flex'
               }`}
             >
-              {/* Real-time Generation Progress Bar */}
-              <GenerationProgress status={queueStatus} onCancel={handleCancel} />
+              {/* Pre-flight problems / failure reason (persistent until dismissed) */}
+              {notice && (
+                <div className="shrink-0">
+                  <GenerationNotice
+                    notice={notice}
+                    onDismiss={() => setNotice(null)}
+                    onProceed={() => {
+                      setNotice(null);
+                      void handleGenerate({ ignoreWarnings: true });
+                    }}
+                  />
+                </div>
+              )}
 
-              {/* Live Video Player Stage */}
-              <StagePreview
-                currentTake={currentTake}
-                aspectRatio={params.aspectRatio}
-                fps={params.fps}
-                isGenerating={queueStatus.isGenerating}
-              />
+              {/* Real-time Generation Progress Bar */}
+              <div className="shrink-0">
+                <GenerationProgress status={queueStatus} onCancel={handleCancel} />
+              </div>
+
+              {/* Live Video Player Stage — never squeezed by content below it. */}
+              <div className="shrink-0 flex flex-col min-h-[420px]">
+                <StagePreview
+                  currentTake={currentTake}
+                  aspectRatio={params.aspectRatio}
+                  fps={params.fps}
+                  isGenerating={queueStatus.isGenerating}
+                />
+              </div>
 
               {/* Video Output & Upscale Bar */}
-              <UpscaleBanner
-                currentTake={currentTake}
-                upscaleState={upscaleState}
-                onUpscale={handleUpscale}
-                onCompareWithDraft={handleCompareWithDraft}
-                originalDraftTake={originalDraftTake}
-              />
+              <div className="shrink-0">
+                <UpscaleBanner
+                  currentTake={currentTake}
+                  upscaleState={upscaleState}
+                  onUpscale={handleUpscale}
+                  onEnhance={handleEnhance}
+                  enhanceCostUsd={
+                    currentTake?.draftCacheUrl
+                      ? flux3EnhanceCost(currentTake.duration)
+                      : undefined
+                  }
+                  onCompareWithDraft={handleCompareWithDraft}
+                  originalDraftTake={originalDraftTake}
+                />
+              </div>
 
               {/* Action Bar */}
-              <ActionBar
-                onGenerate={handleGenerate}
-                onExtend={handleExtend}
-                onDownload={handleDownload}
-                costEstimate={currentCost}
-                isGenerating={queueStatus.isGenerating || upscaleState.isUpscaling}
-                canExtend={Boolean(currentTake)}
-                canDownload={Boolean(currentTake)}
-              />
+              <div className="shrink-0">
+                <ActionBar
+                  onGenerate={handleGenerate}
+                  onExtend={handleExtend}
+                  onDownload={handleDownload}
+                  costEstimate={currentCost}
+                  isGenerating={queueStatus.isGenerating || upscaleState.isUpscaling}
+                  canExtend={Boolean(currentTake)}
+                  canDownload={Boolean(currentTake)}
+                />
+              </div>
 
-              {/* Docked Generations Gallery Section */}
-              <div className="border border-white/[0.08] rounded-2xl overflow-hidden bg-neutral-900/60 shadow-lg">
+              {/* Docked Generations Gallery Section — collapsible */}
+              <div className="shrink-0 border border-white/[0.08] rounded-2xl overflow-hidden bg-neutral-900/60 shadow-lg">
                 <div className="px-4 py-3 bg-neutral-900/80 border-b border-white/[0.08] flex items-center justify-between text-xs">
-                  <div className="flex items-center gap-2">
-                    <span className="font-semibold text-white">
+                  <button
+                    type="button"
+                    onClick={() => setIsHistoryCollapsed((v) => !v)}
+                    className="flex items-center gap-2 text-white hover:text-neutral-200 transition-colors"
+                    aria-expanded={!isHistoryCollapsed}
+                    aria-controls="generations-history-panel"
+                    title={isHistoryCollapsed ? 'Expand history' : 'Collapse history'}
+                  >
+                    {isHistoryCollapsed ? (
+                      <ChevronDown className="w-3.5 h-3.5 text-neutral-400" />
+                    ) : (
+                      <ChevronUp className="w-3.5 h-3.5 text-neutral-400" />
+                    )}
+                    <span className="font-semibold">
                       Generations History ({takes.length})
                     </span>
-                  </div>
+                  </button>
                   <button
                     type="button"
                     onClick={() => setCurrentView('gallery')}
@@ -756,18 +1069,23 @@ export default function App() {
                     <Grid className="w-3 h-3" />
                   </button>
                 </div>
-                <div className="max-h-[440px] overflow-y-auto">
-                  <GenerationsGallery
-                    takes={takes}
-                    selectedTakeId={currentTake?.id || null}
-                    batchUpscaleState={batchUpscaleState}
-                    onSelectTake={setCurrentTake}
-                    onToggleFavorite={handleToggleFavorite}
-                    onBatchUpscale={handleBatchUpscale}
-                    onDeleteTake={handleDeleteTake}
-                    compact={true}
-                  />
-                </div>
+                {!isHistoryCollapsed && (
+                  <div
+                    id="generations-history-panel"
+                    className="max-h-[440px] overflow-y-auto"
+                  >
+                    <GenerationsGallery
+                      takes={takes}
+                      selectedTakeId={currentTake?.id || null}
+                      batchUpscaleState={batchUpscaleState}
+                      onSelectTake={setCurrentTake}
+                      onToggleFavorite={handleToggleFavorite}
+                      onBatchUpscale={handleBatchUpscale}
+                      onDeleteTake={handleDeleteTake}
+                      compact={true}
+                    />
+                  </div>
+                )}
               </div>
             </section>
           </main>
@@ -786,6 +1104,9 @@ export default function App() {
         </div>
       )}
 
+      {/* My Usage Modal */}
+      <UsageModal isOpen={isUsageOpen} onClose={() => setIsUsageOpen(false)} />
+
       {/* App Startup Greeting & Saved Sessions Library Modal */}
       <ProjectSessionModal
         isOpen={isSessionModalOpen}
@@ -801,6 +1122,9 @@ export default function App() {
         onDeleteProject={handleDeleteProject}
         onDuplicateProject={handleDuplicateProject}
         onRenameProject={handleRenameProject}
+        currentUserEmail={currentUser.email}
+        teamMembers={teamMembers}
+        onChangeVisibility={handleChangeVisibility}
       />
     </div>
   );

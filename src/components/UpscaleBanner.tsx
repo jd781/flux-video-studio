@@ -6,6 +6,10 @@ interface UpscaleBannerProps {
   currentTake: VideoTake | null;
   upscaleState: UpscaleState;
   onUpscale: (resolution: '1080p' | '4K') => void;
+  /** FLUX 3: re-render a draft take at full quality from its saved cache. */
+  onEnhance?: () => void;
+  /** Estimated cost of the enhance, shown on the button. */
+  enhanceCostUsd?: number;
   onCompareWithDraft?: (draftId: string) => void;
   originalDraftTake?: VideoTake | null;
 }
@@ -14,6 +18,8 @@ export const UpscaleBanner: React.FC<UpscaleBannerProps> = ({
   currentTake,
   upscaleState,
   onUpscale,
+  onEnhance,
+  enhanceCostUsd,
   onCompareWithDraft,
   originalDraftTake,
 }) => {
@@ -44,7 +50,46 @@ export const UpscaleBanner: React.FC<UpscaleBannerProps> = ({
     );
   }
 
-  // Already upscaled take banner with option to compare with original 480p draft
+  // FLUX 3 draft with a saved cache: offer to re-render that exact draft at
+  // full quality (draft-enhance) instead of a generic upscale.
+  if (currentTake.qualityTier === 'draft' && currentTake.draftCacheUrl && onEnhance) {
+    return (
+      <div className="bg-neutral-900/80 border border-white/[0.08] rounded-2xl p-3.5 backdrop-blur-xl shadow-lg flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-xl bg-white/10 flex items-center justify-center text-white shrink-0">
+            <Sparkles className="w-4 h-4" />
+          </div>
+          <div>
+            <div className="text-xs font-medium text-white">
+              Draft ready ({currentTake.resolution}). Happy with this one?
+            </div>
+            <div className="text-[11px] text-neutral-400">
+              Enhance re-renders this exact draft at full quality: same motion, same
+              take, no re-planning.
+            </div>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={onEnhance}
+          className="px-3.5 py-1.5 rounded-xl bg-white text-neutral-950 font-medium text-xs hover:bg-neutral-200 transition-colors flex items-center gap-1.5 shadow-sm"
+        >
+          <Sparkles className="w-3 h-3" />
+          <span>
+            Enhance to 1080p
+            {typeof enhanceCostUsd === 'number' && (
+              <span className="ml-1.5 font-mono opacity-70">
+                ~${enhanceCostUsd.toFixed(2)}
+              </span>
+            )}
+          </span>
+        </button>
+      </div>
+    );
+  }
+
+  // Already upscaled take banner with option to compare with the original draft
   if (currentTake.resolution !== '480p' && currentTake.qualityTier === 'final') {
     return (
       <div className="bg-neutral-900/60 border border-white/[0.08] rounded-2xl p-3 flex items-center justify-between gap-3 text-xs">
@@ -69,7 +114,7 @@ export const UpscaleBanner: React.FC<UpscaleBannerProps> = ({
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-medium transition-colors"
           >
             <ArrowLeftRight className="w-3 h-3 text-neutral-400" />
-            <span>Compare with 480p Draft</span>
+            <span>Compare with {originalDraftTake.resolution} Draft</span>
           </button>
         )}
       </div>
@@ -86,7 +131,7 @@ export const UpscaleBanner: React.FC<UpscaleBannerProps> = ({
           </div>
           <div>
             <div className="text-xs font-medium text-white">
-              Draft render complete (480p). Ready for production?
+              Draft render complete ({currentTake.resolution}). Ready for production?
             </div>
             <div className="text-[11px] text-neutral-400">
               Upscale to sharp high definition using video diffusion

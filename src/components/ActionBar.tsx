@@ -12,7 +12,7 @@ interface ActionBarProps {
   onDownload: () => void;
   costEstimate: {
     dollars: number;
-    credits: number;
+    tokens: number;
     formatted: string;
   };
   isGenerating: boolean;

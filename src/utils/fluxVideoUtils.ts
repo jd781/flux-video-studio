@@ -2,37 +2,79 @@ import {
   AspectRatio,
   DurationSeconds,
   FluxGenerationParams,
+  ModelId,
+  ModelResolution,
   QualityTier,
   TimelineKeyframe,
   VideoTake,
   WorkflowMode,
 } from '../types/flux';
+import { getModel, resolveOutputResolution } from './modelCatalog';
+import { flux3Cost, flux3KindForMode } from './flux3';
 
 /**
- * Calculates generation cost in USD and platform compute credits.
- * Resolution Quality Tiers:
- * - Draft (480p): ~$0.30 • 5x faster
- * - Full Quality (1080p): ~$2.50 • Production grade
+ * Estimated fal.ai cost for a generation, matching the server's token-based
+ * math (see server/pricing.ts). Seedance bills per 1,000 tokens where
+ *   tokens ≈ tokensPerSecond[resolution] × duration
+ * The per-second token rates are calibrated to a real fal charge (480p/5s on
+ * Seedance 2.0 billed $0.57 at $0.0112/1k tokens), and per-1000-token rates
+ * come from fal's Pricing API (2.0: $0.0112, 2.5: $0.0214).
+ *
+ * This is an estimate shown in the UI; the server records the authoritative
+ * figure using live prices after each generation.
+ */
+
+// Calibrated tokens/second by resolution (mirrors server/pricing.ts).
+const TOKENS_PER_SECOND: Record<'480p' | '720p' | '1080p', number> = {
+  '480p': 10179,
+  '720p': 27130,
+  '1080p': 61074,
+};
+
+const PER_1000_TOKENS_USD: Partial<Record<ModelId, number>> = {
+  'seedance-2.0': 0.0112,
+  'seedance-2.5': 0.0214,
+};
+
+/**
+ * FLUX 3 bills per second of output rather than per token; those rates live in
+ * utils/flux3.ts (shared with the server).
  */
 export function calculateCost(
+  modelId: ModelId,
   duration: DurationSeconds,
   qualityTier: QualityTier,
-  nativeAudio: boolean,
-  inferenceSteps: number = 30
-): { dollars: number; credits: number; formatted: string } {
-  const durationFactor = duration / 5;
-  const baseRate = qualityTier === 'draft' ? 0.30 : 2.50;
-  const audioRate = nativeAudio ? (qualityTier === 'draft' ? 0.05 : 0.20) : 0;
-  const stepModifier = Math.max(0.7, Math.min(1.5, inferenceSteps / 30));
+  opts: { workflowMode?: WorkflowMode; resolution?: ModelResolution } = {}
+): { dollars: number; tokens: number; formatted: string } {
+  if (getModel(modelId).family === 'flux-3') {
+    const mode: WorkflowMode = opts.workflowMode ?? 'text_to_video';
+    const kind = flux3KindForMode(mode) ?? 'text';
+    const resolution = resolveOutputResolution({
+      modelId,
+      qualityTier,
+      workflowMode: mode,
+      resolution: opts.resolution,
+    });
+    const dollars =
+      Math.round(flux3Cost(kind, resolution, duration, qualityTier === 'draft') * 100) / 100;
+    return { dollars, tokens: 0, formatted: `~$${dollars.toFixed(2)}` };
+  }
 
-  const totalDollars = (baseRate + audioRate) * Math.sqrt(durationFactor) * stepModifier;
-  const roundedDollars = Math.round(totalDollars * 100) / 100;
-  const credits = Math.max(5, Math.round(roundedDollars / 0.004));
+  const resolution: '480p' | '720p' | '1080p' =
+    qualityTier === 'draft'
+      ? '480p'
+      : modelId === 'seedance-2.5'
+      ? '1080p'
+      : '720p';
+
+  const tokens = Math.round(TOKENS_PER_SECOND[resolution] * duration);
+  const perThousand = PER_1000_TOKENS_USD[modelId] ?? 0.0214;
+  const dollars = Math.round((tokens / 1000) * perThousand * 100) / 100;
 
   return {
-    dollars: roundedDollars,
-    credits,
-    formatted: `$${roundedDollars.toFixed(2)} (${credits} Credits)`,
+    dollars,
+    tokens,
+    formatted: `~$${dollars.toFixed(2)}`,
   };
 }
 
@@ -152,6 +194,7 @@ export const SAMPLE_PROMPTS = [
  * Default initial parameters
  */
 export const DEFAULT_FLUX_PARAMS: FluxGenerationParams = {
+  modelId: 'seedance-2.5',
   workflowMode: 'text_to_video',
   prompt:
     'Cinematic 35mm anamorphic shot of a cybernetic courier in a neon-drenched Tokyo alleyway at night. Heavy rain splashing on asphalt, volumetric cyan and magenta holograms, slow dynamic forward dolly zoom.',
@@ -198,6 +241,9 @@ export const DEFAULT_FLUX_PARAMS: FluxGenerationParams = {
     'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?auto=format&fit=crop&w=600&q=80',
     'https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=600&q=80',
   ],
+  referenceVideos: [],
+  referenceTask: 'reference',
+  safetyTolerance: 2,
 };
 
 export function calculateBatchUpscaleCost(
@@ -378,61 +424,4 @@ export const INITIAL_TAKES: VideoTake[] = [
   },
 ];
 
-/**
- * Simulates calling fal.ai's video upscaler endpoint ('fal-ai/video-upscaler' or Topaz Video AI).
- * Reconstructs high-frequency details, sharpens edges, and generates a production-grade 1080p or 4K stream.
- */
-export async function simulateFalVideoUpscale(
-  draftTake: VideoTake,
-  targetResolution: '1080p' | '4K',
-  onProgress?: (percent: number, stepMessage: string) => void
-): Promise<VideoTake> {
-  const steps = [
-    { percent: 18, msg: 'Submitting draft tensor (480p) to fal-ai/video-upscaler...' },
-    { percent: 42, msg: 'Computing spatial-temporal optical flow & motion vectors...' },
-    { percent: 68, msg: `Synthesizing high-frequency neural details (${targetResolution})...` },
-    { percent: 88, msg: `Denoising film grain & edge enhancement pass (${targetResolution})...` },
-    { percent: 98, msg: `Finalizing ${targetResolution} 60fps MP4 master container...` },
-  ];
 
-  for (const step of steps) {
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    if (onProgress) {
-      onProgress(step.percent, step.msg);
-    }
-  }
-
-  // Provide crisp, high-resolution upscaled stream
-  const highResVideos: Record<string, string> = {
-    '1080p': 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4',
-    '4K': 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
-  };
-
-  const upscaledTake: VideoTake = {
-    id: `take-upscaled-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-    createdAt: Date.now(),
-    title: `${draftTake.title} [${targetResolution}]`,
-    videoUrl: highResVideos[targetResolution] || draftTake.videoUrl,
-    posterUrl: draftTake.posterUrl,
-    duration: draftTake.duration,
-    aspectRatio: draftTake.aspectRatio,
-    qualityTier: 'final',
-    resolution: targetResolution,
-    prompt: draftTake.prompt,
-    params: {
-      ...draftTake.params,
-      qualityTier: 'final',
-    },
-    hasAudio: draftTake.hasAudio,
-    costEstimate: targetResolution === '4K' ? 1.20 : 0.75,
-    isFavorite: draftTake.isFavorite,
-    upscaledFromId: draftTake.id,
-    upscaleDetails: {
-      model: 'fal-ai/video-upscaler',
-      targetResolution,
-      upscaledAt: Date.now(),
-    },
-  };
-
-  return upscaledTake;
-}

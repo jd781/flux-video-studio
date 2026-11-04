@@ -10,9 +10,13 @@ import {
   Plus,
   Play,
   Sliders,
+  BarChart3,
+  Shield,
+  LogOut,
 } from 'lucide-react';
 import { SAMPLE_PROMPTS } from '../utils/fluxVideoUtils';
 import { AspectRatio, DurationSeconds, FluxProject } from '../types/flux';
+import { AuthUser, logout } from '../lib/auth';
 
 interface HeaderProps {
   onLoadPreset: (preset: {
@@ -21,7 +25,8 @@ interface HeaderProps {
     duration: DurationSeconds;
     title: string;
   }) => void;
-  userCredits: number;
+  currentUser: AuthUser;
+  onOpenUsage: () => void;
   currentView?: 'studio' | 'gallery';
   onChangeView?: (view: 'studio' | 'gallery') => void;
   takesCount?: number;
@@ -35,7 +40,8 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({
   onLoadPreset,
-  userCredits,
+  currentUser,
+  onOpenUsage,
   currentView = 'studio',
   onChangeView,
   takesCount = 0,
@@ -49,6 +55,7 @@ export const Header: React.FC<HeaderProps> = ({
   const [showHelpModal, setShowHelpModal] = useState(false);
   const [showPresetsMenu, setShowPresetsMenu] = useState(false);
   const [showProjectMenu, setShowProjectMenu] = useState(false);
+  const [showUserMenu, setShowUserMenu] = useState(false);
 
   return (
     <header className="h-13 border-b border-white/[0.08] bg-neutral-950/80 backdrop-blur-2xl px-4 sm:px-6 flex items-center justify-between z-30 sticky top-0 text-neutral-100">
@@ -59,7 +66,7 @@ export const Header: React.FC<HeaderProps> = ({
           <div className="w-7 h-7 rounded-lg bg-white/10 border border-white/15 flex items-center justify-center text-white">
             <Film className="w-3.5 h-3.5" />
           </div>
-          <span className="font-semibold tracking-tight text-white text-sm">FLUX</span>
+          <span className="font-semibold tracking-tight text-white text-sm">Studio52</span>
         </div>
 
         <div className="h-4 w-px bg-white/10 hidden sm:block" />
@@ -238,11 +245,6 @@ export const Header: React.FC<HeaderProps> = ({
           )}
         </div>
 
-        {/* Compute Credits Balance Pill */}
-        <div className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-neutral-900/60 border border-white/[0.08] text-xs text-neutral-300 font-mono">
-          <span className="text-neutral-200 font-medium">${(userCredits * 0.004).toFixed(2)}</span>
-        </div>
-
         {/* Shortcuts & Guide */}
         <button
           onClick={() => setShowHelpModal(true)}
@@ -252,6 +254,82 @@ export const Header: React.FC<HeaderProps> = ({
         >
           <HelpCircle className="w-4 h-4" />
         </button>
+
+        {/* User Menu */}
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setShowUserMenu((v) => !v)}
+            className="flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-lg hover:bg-white/5 transition-colors"
+            title={currentUser.email}
+          >
+            {currentUser.picture ? (
+              <img
+                src={currentUser.picture}
+                alt={currentUser.name || currentUser.email}
+                className="w-6 h-6 rounded-full border border-white/15"
+                referrerPolicy="no-referrer"
+              />
+            ) : (
+              <div className="w-6 h-6 rounded-full bg-white/10 border border-white/15 flex items-center justify-center text-[10px] font-semibold text-white uppercase">
+                {(currentUser.name || currentUser.email).charAt(0)}
+              </div>
+            )}
+            <ChevronDown className="w-3 h-3 text-neutral-400" />
+          </button>
+
+          {showUserMenu && (
+            <>
+              <div
+                className="fixed inset-0 z-40"
+                onClick={() => setShowUserMenu(false)}
+              />
+              <div className="absolute right-0 top-full mt-1.5 w-56 bg-neutral-900/95 border border-white/10 rounded-xl shadow-2xl z-50 overflow-hidden backdrop-blur-xl">
+                <div className="px-3 py-2.5 border-b border-white/[0.08]">
+                  <div className="text-xs font-medium text-white truncate">
+                    {currentUser.name || 'Signed in'}
+                  </div>
+                  <div className="text-[11px] text-neutral-400 truncate font-mono">
+                    {currentUser.email}
+                  </div>
+                  {currentUser.isAdmin && (
+                    <span className="inline-block mt-1 text-[9px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded bg-white/10 text-white">
+                      Admin
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowUserMenu(false);
+                    onOpenUsage();
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-xs text-neutral-200 hover:bg-white/5 transition-colors"
+                >
+                  <BarChart3 className="w-3.5 h-3.5 text-neutral-400" />
+                  <span>My Usage</span>
+                </button>
+                {currentUser.isAdmin && (
+                  <a
+                    href="/admin"
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-neutral-200 hover:bg-white/5 transition-colors"
+                  >
+                    <Shield className="w-3.5 h-3.5 text-neutral-400" />
+                    <span>Admin Dashboard</span>
+                  </a>
+                )}
+                <button
+                  type="button"
+                  onClick={() => logout()}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-xs text-neutral-200 hover:bg-white/5 transition-colors border-t border-white/[0.08]"
+                >
+                  <LogOut className="w-3.5 h-3.5 text-neutral-400" />
+                  <span>Sign out</span>
+                </button>
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Sleek Help Modal */}

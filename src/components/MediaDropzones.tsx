@@ -15,21 +15,32 @@ import {
   TimelineKeyframe,
   WorkflowMode,
 } from '../types/flux';
+import { keyframeFrameIndex } from '../utils/flux3';
 
 interface MediaDropzonesProps {
   workflowMode: WorkflowMode;
   duration: DurationSeconds;
+  /** Max reference images the selected model accepts. */
+  maxReferenceImages?: number;
+  /** Max reference videos the selected model accepts. */
+  maxReferenceVideos?: number;
   startFrameUrl: string | null;
   endFrameUrl: string | null;
   keyframes: TimelineKeyframe[];
   sourceVideoUrl: string | null;
   sourceVideoName?: string;
   referenceImages?: string[];
+  referenceVideos?: string[];
+  /** Show the 24 fps frame index next to each timeline pin (FLUX 3 keyframes). */
+  showFrameIndex?: boolean;
   onUpdateStartFrame: (url: string | null) => void;
   onUpdateEndFrame: (url: string | null) => void;
   onUpdateKeyframes: (keyframes: TimelineKeyframe[]) => void;
   onUpdateSourceVideo: (url: string | null, name?: string) => void;
   onUpdateReferenceImages?: (images: string[]) => void;
+  onUpdateReferenceVideos?: (videos: string[]) => void;
+  /** Append a reference tag (e.g. "@Image1") to the prompt. */
+  onInsertPromptTag?: (tag: string) => void;
 }
 
 const CURATED_SAMPLE_IMAGES = [
@@ -69,21 +80,37 @@ const CURATED_SAMPLE_VIDEOS = [
 export const MediaDropzones: React.FC<MediaDropzonesProps> = ({
   workflowMode,
   duration,
+  maxReferenceImages = 10,
+  maxReferenceVideos = 10,
   startFrameUrl,
   endFrameUrl,
   keyframes,
   sourceVideoUrl,
   sourceVideoName,
   referenceImages = [],
+  referenceVideos = [],
+  showFrameIndex = false,
   onUpdateStartFrame,
   onUpdateEndFrame,
   onUpdateKeyframes,
   onUpdateSourceVideo,
   onUpdateReferenceImages,
+  onUpdateReferenceVideos,
+  onInsertPromptTag,
 }) => {
   const startInputRef = useRef<HTMLInputElement>(null);
   const endInputRef = useRef<HTMLInputElement>(null);
   const videoInputRef = useRef<HTMLInputElement>(null);
+  const refVideosInputRef = useRef<HTMLInputElement>(null);
+  // Hidden file input used to upload/replace a specific timeline keyframe image.
+  const keyframeInputRef = useRef<HTMLInputElement>(null);
+  const keyframeUploadTargetRef = useRef<string | null>(null);
+
+  // Opens the file picker to set/replace the image for a given keyframe.
+  const triggerKeyframeUpload = (keyframeId: string) => {
+    keyframeUploadTargetRef.current = keyframeId;
+    keyframeInputRef.current?.click();
+  };
   const refImagesInputRef = useRef<HTMLInputElement>(null);
 
   const [activePresetSlot, setActivePresetSlot] = useState<'start' | 'end' | 'keyframe' | null>(null);
@@ -92,7 +119,7 @@ export const MediaDropzones: React.FC<MediaDropzonesProps> = ({
 
   const handleMultipleRefImageUploads = (files: File[]) => {
     const currentImages = referenceImages || [];
-    const remainingSlots = 10 - currentImages.length;
+    const remainingSlots = maxReferenceImages - currentImages.length;
     if (remainingSlots <= 0) return;
     const filesToRead = files.slice(0, remainingSlots);
     const newUrls: string[] = [];
@@ -105,7 +132,9 @@ export const MediaDropzones: React.FC<MediaDropzonesProps> = ({
         }
         loaded++;
         if (loaded === filesToRead.length) {
-          onUpdateReferenceImages?.([...currentImages, ...newUrls].slice(0, 10));
+          onUpdateReferenceImages?.(
+            [...currentImages, ...newUrls].slice(0, maxReferenceImages)
+          );
         }
       };
       reader.readAsDataURL(file);
@@ -119,8 +148,37 @@ export const MediaDropzones: React.FC<MediaDropzonesProps> = ({
 
   const handleAddPresetRefImage = (url: string) => {
     const current = referenceImages || [];
-    if (current.length >= 10) return;
+    if (current.length >= maxReferenceImages) return;
     onUpdateReferenceImages?.([...current, url]);
+  };
+
+  // Reference VIDEOS (up to maxReferenceVideos). Each becomes @Video1, @Video2...
+  const handleMultipleRefVideoUploads = (files: File[]) => {
+    const current = referenceVideos || [];
+    const remaining = maxReferenceVideos - current.length;
+    if (remaining <= 0) return;
+    const toRead = files.slice(0, remaining);
+    const newUrls: string[] = [];
+    let loaded = 0;
+    toRead.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        if (e.target?.result) newUrls.push(e.target.result as string);
+        loaded++;
+        if (loaded === toRead.length) {
+          onUpdateReferenceVideos?.(
+            [...current, ...newUrls].slice(0, maxReferenceVideos)
+          );
+        }
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handleRemoveRefVideo = (index: number) => {
+    onUpdateReferenceVideos?.(
+      (referenceVideos || []).filter((_, i) => i !== index)
+    );
   };
 
   // File upload handler helper
@@ -154,15 +212,18 @@ export const MediaDropzones: React.FC<MediaDropzonesProps> = ({
       duration,
       Math.round(((keyframes.length * (duration / 4)) % duration) * 10) / 10
     );
+    const newId = `kf-${Date.now()}`;
     const newKf: TimelineKeyframe = {
-      id: `kf-${Date.now()}`,
+      id: newId,
       timeSeconds: nextTime,
-      imageUrl: CURATED_SAMPLE_IMAGES[keyframes.length % CURATED_SAMPLE_IMAGES.length].url,
+      imageUrl: '', // no placeholder — user uploads their own image
       label: `Frame ${keyframes.length + 1}`,
       note: `@ ${nextTime}s`,
     };
     const updated = [...keyframes, newKf].sort((a, b) => a.timeSeconds - b.timeSeconds);
     onUpdateKeyframes(updated);
+    // Immediately prompt for the image so a new frame isn't left blank.
+    triggerKeyframeUpload(newId);
   };
 
   const handleRemoveKeyframe = (id: string) => {
@@ -186,7 +247,7 @@ export const MediaDropzones: React.FC<MediaDropzonesProps> = ({
           <span className="font-medium text-zinc-300">Pure Text Synthesis Active</span>
         </div>
         <p className="text-[11px] text-zinc-500 max-w-xs mx-auto">
-          FLUX Video generates scene geometry, lighting, and motion vectors directly from your text prompt. Switch tabs above to anchor images or keyframes.
+Generates scene geometry, lighting, and motion vectors directly from your text prompt. Switch tabs above to anchor images or keyframes.
         </p>
       </div>
     );
@@ -443,7 +504,7 @@ export const MediaDropzones: React.FC<MediaDropzonesProps> = ({
                   Drop target ending image or <span className="text-amber-400">browse</span>
                 </p>
                 <p className="text-[10px] text-zinc-500 mt-0.5">
-                  FLUX interpolates lighting & camera motion to reach this frame
+                  Interpolates lighting & camera motion to reach this frame
                 </p>
               </div>
             )}
@@ -454,6 +515,22 @@ export const MediaDropzones: React.FC<MediaDropzonesProps> = ({
       {/* 3. Reference Timeline Mode (Up to 10 anchored frames with timestamps) */}
       {workflowMode === 'keyframes_timeline' && (
         <div className="space-y-2.5">
+          {/* Hidden input that uploads an image into the targeted keyframe. */}
+          <input
+            ref={keyframeInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              const target = keyframeUploadTargetRef.current;
+              if (file && target) {
+                handleFileUpload(file, 'keyframe', target);
+              }
+              keyframeUploadTargetRef.current = null;
+              e.target.value = ''; // allow re-selecting the same file
+            }}
+          />
           <div className="flex items-center justify-between text-xs">
             <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
               <Clock className="w-3.5 h-3.5 text-cyan-400" />
@@ -509,17 +586,33 @@ export const MediaDropzones: React.FC<MediaDropzonesProps> = ({
                   key={kf.id}
                   className="flex items-center gap-2 p-1.5 bg-zinc-950 rounded-lg border border-zinc-800 hover:border-zinc-700"
                 >
-                  {/* Thumbnail */}
-                  <div className="w-14 h-10 rounded overflow-hidden bg-black flex-shrink-0 relative">
-                    <img
-                      src={kf.imageUrl}
-                      alt={kf.label || `Frame ${index + 1}`}
-                      className="w-full h-full object-cover"
-                    />
+                  {/* Thumbnail — click to upload / replace */}
+                  <button
+                    type="button"
+                    onClick={() => triggerKeyframeUpload(kf.id)}
+                    className="w-14 h-10 rounded overflow-hidden bg-black flex-shrink-0 relative group/kf border border-transparent hover:border-cyan-400 transition-colors"
+                    title={kf.imageUrl ? 'Replace image' : 'Upload image'}
+                  >
+                    {kf.imageUrl ? (
+                      <img
+                        src={kf.imageUrl}
+                        alt={kf.label || `Frame ${index + 1}`}
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <span className="w-full h-full flex flex-col items-center justify-center text-cyan-300/70 bg-zinc-900">
+                        <UploadCloud className="w-3.5 h-3.5" />
+                      </span>
+                    )}
                     <span className="absolute top-0.5 left-0.5 bg-black/80 text-[8px] text-cyan-300 font-mono px-1 rounded">
                       #{index + 1}
                     </span>
-                  </div>
+                    {kf.imageUrl && (
+                      <span className="absolute inset-0 bg-black/50 opacity-0 group-hover/kf:opacity-100 transition-opacity flex items-center justify-center">
+                        <UploadCloud className="w-3.5 h-3.5 text-white" />
+                      </span>
+                    )}
+                  </button>
 
                   {/* Timestamp & Label */}
                   <div className="flex-1 min-w-0 flex items-center gap-2">
@@ -537,6 +630,14 @@ export const MediaDropzones: React.FC<MediaDropzonesProps> = ({
                         className="w-14 bg-zinc-900 border border-zinc-700 rounded px-1.5 py-0.5 text-xs text-white font-mono"
                       />
                       <span className="text-[10px] text-zinc-500">s</span>
+                      {showFrameIndex && (
+                        <span
+                          className="text-[10px] text-cyan-400/80 font-mono whitespace-nowrap"
+                          title="Frame index sent to FLUX 3 (24 fps)"
+                        >
+                          f{keyframeFrameIndex(kf.timeSeconds, duration)}
+                        </span>
+                      )}
                     </div>
 
                     <input
@@ -557,13 +658,21 @@ export const MediaDropzones: React.FC<MediaDropzonesProps> = ({
                   <div className="flex items-center gap-1">
                     <button
                       type="button"
+                      onClick={() => triggerKeyframeUpload(kf.id)}
+                      className="text-[10px] text-zinc-400 hover:text-cyan-300 px-1 py-0.5 bg-zinc-900 rounded"
+                      title="Upload / replace image"
+                    >
+                      Upload
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => {
                         setTargetKeyframeId(targetKeyframeId === kf.id ? null : kf.id);
                       }}
                       className="text-[10px] text-zinc-400 hover:text-cyan-300 px-1 py-0.5 bg-zinc-900 rounded"
-                      title="Select image preset"
+                      title="Choose a sample preset"
                     >
-                      Swap
+                      Presets
                     </button>
                     <button
                       type="button"
@@ -581,8 +690,21 @@ export const MediaDropzones: React.FC<MediaDropzonesProps> = ({
             {/* Swap preset chooser */}
             {targetKeyframeId && (
               <div className="p-2 bg-zinc-900 border border-cyan-800/80 rounded-lg">
-                <div className="text-[10px] text-cyan-300 font-medium mb-1">
-                  Choose frame image:
+                <div className="flex items-center justify-between mb-1">
+                  <div className="text-[10px] text-cyan-300 font-medium">
+                    Sample presets (or upload your own):
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = targetKeyframeId;
+                      setTargetKeyframeId(null);
+                      if (target) triggerKeyframeUpload(target);
+                    }}
+                    className="flex items-center gap-1 text-[10px] text-cyan-300 hover:text-cyan-200 px-1.5 py-0.5 bg-cyan-950/60 border border-cyan-800 rounded"
+                  >
+                    <UploadCloud className="w-3 h-3" /> Upload
+                  </button>
                 </div>
                 <div className="grid grid-cols-5 gap-1.5">
                   {CURATED_SAMPLE_IMAGES.map((sample) => (
@@ -615,7 +737,10 @@ export const MediaDropzones: React.FC<MediaDropzonesProps> = ({
           <div className="flex items-center justify-between text-xs">
             <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
               <Film className="w-3.5 h-3.5 text-purple-400" />
-              Source Video Clip <span className="text-zinc-500 text-[10px] font-normal">(MP4 to extend / restyle)</span>
+              Source Video Clip{' '}
+              <span className="text-zinc-500 text-[10px] font-normal">
+                (MP4 to extend / restyle)
+              </span>
             </span>
             <div className="flex items-center gap-1.5">
               <button
@@ -714,7 +839,7 @@ export const MediaDropzones: React.FC<MediaDropzonesProps> = ({
                   Drop existing video (.mp4) or <span className="text-purple-400">browse</span>
                 </p>
                 <p className="text-[10px] text-zinc-500 mt-0.5">
-                  FLUX will analyze motion vectors and extend the clip smoothly
+                  Analyzes motion vectors and extends the clip smoothly
                 </p>
               </div>
             )}
@@ -727,7 +852,7 @@ export const MediaDropzones: React.FC<MediaDropzonesProps> = ({
                 <ImageIcon className="w-3.5 h-3.5 text-cyan-400" />
                 Reference Images
                 <span className="text-zinc-500 text-[10px] font-normal font-mono">
-                  ({(referenceImages || []).length}/10 max)
+                  ({(referenceImages || []).length}/{maxReferenceImages} max)
                 </span>
               </span>
               <div className="flex items-center gap-1.5">
@@ -762,7 +887,7 @@ export const MediaDropzones: React.FC<MediaDropzonesProps> = ({
                     <button
                       key={sample.name}
                       type="button"
-                      disabled={(referenceImages || []).length >= 10}
+                      disabled={(referenceImages || []).length >= maxReferenceImages}
                       onClick={() => handleAddPresetRefImage(sample.url)}
                       className="aspect-video rounded overflow-hidden border border-zinc-700 hover:border-cyan-400 disabled:opacity-40"
                       title={sample.name}
@@ -830,8 +955,8 @@ export const MediaDropzones: React.FC<MediaDropzonesProps> = ({
                     </div>
                   ))}
 
-                  {/* Add more button if < 10 */}
-                  {(referenceImages || []).length < 10 && (
+                  {/* Add more button if under the model's limit */}
+                  {(referenceImages || []).length < maxReferenceImages && (
                     <button
                       type="button"
                       onClick={() => refImagesInputRef.current?.click()}
@@ -852,10 +977,224 @@ export const MediaDropzones: React.FC<MediaDropzonesProps> = ({
                     <UploadCloud className="w-4 h-4" />
                   </div>
                   <p className="text-xs font-medium text-zinc-300">
-                    Drop up to 10 reference images or <span className="text-cyan-400">browse</span>
+                    Drop up to {maxReferenceImages} reference images or{' '}
+                    <span className="text-cyan-400">browse</span>
                   </p>
                   <p className="text-[10px] text-zinc-500 mt-0.5">
                     Guides visual consistency, character likeness, or environment styling
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 5. Reference to Video (Seedance 2.5): multi-image + multi-video refs */}
+      {workflowMode === 'reference_to_video' && (
+        <div className="space-y-3">
+          {/* Reference Images */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
+                <ImageIcon className="w-3.5 h-3.5 text-cyan-400" />
+                Reference Images
+                <span className="text-zinc-500 text-[10px] font-normal font-mono">
+                  ({referenceImages.length}/{maxReferenceImages})
+                </span>
+              </span>
+              {referenceImages.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => onUpdateReferenceImages?.([])}
+                  className="text-[11px] text-zinc-400 hover:text-red-400"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <div
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                const files = Array.from(e.dataTransfer.files).filter((f) =>
+                  f.type.startsWith('image/')
+                );
+                if (files.length > 0) handleMultipleRefImageUploads(files);
+              }}
+              className="rounded-xl border-2 border-dashed border-zinc-800 bg-zinc-950/60 p-2.5"
+            >
+              <input
+                ref={refImagesInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  const files = e.target.files;
+                  if (files && files.length > 0)
+                    handleMultipleRefImageUploads(Array.from(files));
+                }}
+              />
+              {referenceImages.length > 0 ? (
+                <div className="grid grid-cols-5 gap-1.5">
+                  {referenceImages.map((imgUrl, idx) => (
+                    <button
+                      key={`refimg-${idx}`}
+                      type="button"
+                      onClick={() => onInsertPromptTag?.(`@Image${idx + 1}`)}
+                      className="relative group aspect-square rounded-lg overflow-hidden border border-zinc-700 hover:border-cyan-400 bg-black transition-colors"
+                      title={`Insert @Image${idx + 1} into prompt`}
+                    >
+                      <img src={imgUrl} alt={`Reference image ${idx + 1}`} className="w-full h-full object-cover" />
+                      <span className="absolute top-0.5 left-0.5 bg-black/80 text-[8px] font-mono text-cyan-300 px-1 rounded">
+                        @Image{idx + 1}
+                      </span>
+                      <span className="absolute inset-0 bg-cyan-500/0 group-hover:bg-cyan-500/10 transition-colors" />
+                      <span
+                        role="button"
+                        tabIndex={-1}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemoveRefImage(idx);
+                        }}
+                        className="absolute top-0.5 right-0.5 p-0.5 rounded bg-black/80 hover:bg-red-950 text-zinc-300 hover:text-red-300 opacity-0 group-hover:opacity-100 transition-opacity"
+                        aria-label={`Remove reference image ${idx + 1}`}
+                      >
+                        <Trash2 className="w-2.5 h-2.5" />
+                      </span>
+                    </button>
+                  ))}
+                  {referenceImages.length < maxReferenceImages && (
+                    <button
+                      type="button"
+                      onClick={() => refImagesInputRef.current?.click()}
+                      className="aspect-square rounded-lg border border-dashed border-zinc-700 hover:border-cyan-500 bg-zinc-900/50 hover:bg-zinc-800 flex flex-col items-center justify-center text-zinc-400 hover:text-cyan-300"
+                      title="Add reference images"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span className="text-[9px] font-medium mt-0.5">Add</span>
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div
+                  onClick={() => refImagesInputRef.current?.click()}
+                  className="py-3 flex flex-col items-center cursor-pointer hover:bg-zinc-900/40 rounded-lg transition-colors"
+                >
+                  <div className="w-8 h-8 rounded-full bg-cyan-500/10 text-cyan-400 flex items-center justify-center mb-1">
+                    <UploadCloud className="w-4 h-4" />
+                  </div>
+                  <p className="text-xs font-medium text-zinc-300">
+                    Drop up to {maxReferenceImages} images or{' '}
+                    <span className="text-cyan-400">browse</span>
+                  </p>
+                  <p className="text-[10px] text-zinc-500 mt-0.5">
+                    Click a thumbnail to insert @Image1, @Image2, … into the prompt
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Reference Videos */}
+          <div className="space-y-1.5 pt-2 border-t border-zinc-800/80">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
+                <Film className="w-3.5 h-3.5 text-purple-400" />
+                Reference Videos
+                <span className="text-zinc-500 text-[10px] font-normal font-mono">
+                  ({referenceVideos.length}/{maxReferenceVideos})
+                </span>
+              </span>
+              {referenceVideos.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => onUpdateReferenceVideos?.([])}
+                  className="text-[11px] text-zinc-400 hover:text-red-400"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <div
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                const files = Array.from(e.dataTransfer.files).filter((f) =>
+                  f.type.startsWith('video/')
+                );
+                if (files.length > 0) handleMultipleRefVideoUploads(files);
+              }}
+              className="rounded-xl border-2 border-dashed border-zinc-800 bg-zinc-950/60 p-2.5"
+            >
+              <input
+                ref={refVideosInputRef}
+                type="file"
+                accept="video/mp4,video/quicktime,video/webm"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  const files = e.target.files;
+                  if (files && files.length > 0)
+                    handleMultipleRefVideoUploads(Array.from(files));
+                }}
+              />
+              {referenceVideos.length > 0 ? (
+                <div className="grid grid-cols-3 gap-1.5">
+                  {referenceVideos.map((vidUrl, idx) => (
+                    <button
+                      key={`refvid-${idx}`}
+                      type="button"
+                      onClick={() => onInsertPromptTag?.(`@Video${idx + 1}`)}
+                      className="relative group aspect-video rounded-lg overflow-hidden border border-zinc-700 hover:border-purple-400 bg-black transition-colors"
+                      title={`Insert @Video${idx + 1} into prompt`}
+                    >
+                      <video src={vidUrl} muted playsInline className="w-full h-full object-cover" />
+                      <span className="absolute top-0.5 left-0.5 bg-black/80 text-[8px] font-mono text-purple-300 px-1 rounded">
+                        @Video{idx + 1}
+                      </span>
+                      <span className="absolute inset-0 bg-purple-500/0 group-hover:bg-purple-500/10 transition-colors" />
+                      <span
+                        role="button"
+                        tabIndex={-1}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemoveRefVideo(idx);
+                        }}
+                        className="absolute top-0.5 right-0.5 p-0.5 rounded bg-black/80 hover:bg-red-950 text-zinc-300 hover:text-red-300 opacity-0 group-hover:opacity-100 transition-opacity"
+                        aria-label={`Remove reference video ${idx + 1}`}
+                      >
+                        <Trash2 className="w-2.5 h-2.5" />
+                      </span>
+                    </button>
+                  ))}
+                  {referenceVideos.length < maxReferenceVideos && (
+                    <button
+                      type="button"
+                      onClick={() => refVideosInputRef.current?.click()}
+                      className="aspect-video rounded-lg border border-dashed border-zinc-700 hover:border-purple-500 bg-zinc-900/50 hover:bg-zinc-800 flex flex-col items-center justify-center text-zinc-400 hover:text-purple-300"
+                      title="Add reference videos"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span className="text-[9px] font-medium mt-0.5">Add</span>
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div
+                  onClick={() => refVideosInputRef.current?.click()}
+                  className="py-3 flex flex-col items-center cursor-pointer hover:bg-zinc-900/40 rounded-lg transition-colors"
+                >
+                  <div className="w-8 h-8 rounded-full bg-purple-500/10 text-purple-400 flex items-center justify-center mb-1">
+                    <UploadCloud className="w-4 h-4" />
+                  </div>
+                  <p className="text-xs font-medium text-zinc-300">
+                    Drop up to {maxReferenceVideos} videos (.mp4/.mov) or{' '}
+                    <span className="text-purple-400">browse</span>
+                  </p>
+                  <p className="text-[10px] text-zinc-500 mt-0.5">
+                    Click a thumbnail to insert @Video1, @Video2, … • combined ≤ 30s
                   </p>
                 </div>
               )}

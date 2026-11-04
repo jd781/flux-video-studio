@@ -1,0 +1,36 @@
+# Fly.io config for FLUX Video Studio.
+#
+# Single-machine deployment: the app uses SQLite on a mounted volume and an
+# in-process session store, so it must run on ONE machine. Do not scale the
+# web process beyond 1 without moving to Postgres + a shared session store.
+
+app = "52-video-studio"
+primary_region = "iad"          # pick a region near your team (fly platform regions)
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  FAL_PROXY_PORT = "8080"
+  DATA_DIR = "/data"
+  # APP_URL is set as a secret/env at deploy time (see the deploy notes), e.g.
+  #   fly secrets set APP_URL="https://flux-video-studio.fly.dev"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  # Keep one machine always running so the SQLite volume + session store persist.
+  min_machines_running = 1
+  processes = ["app"]
+
+# Persistent storage for the SQLite database (server/db.ts writes to DATA_DIR).
+[mounts]
+  source = "flux_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

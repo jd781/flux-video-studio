@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { FluxProject, FluxGenerationParams } from '../types/flux';
 import {
-  createNewProject,
-  duplicateProject,
-  exportProjectAsJson,
-} from '../utils/projectUtils';
+  FluxProject,
+  FluxGenerationParams,
+  SessionVisibility,
+  TeamMember,
+} from '../types/flux';
+import { exportProjectAsJson } from '../utils/projectUtils';
 import { formatRelativeTime } from '../utils/fluxVideoUtils';
 import {
   Plus,
@@ -20,8 +21,11 @@ import {
   X,
   Play,
   ArrowRight,
-  Layers,
+  Lock,
+  Users,
+  UserPlus,
 } from 'lucide-react';
+import { ShareControl } from './ShareControl';
 
 export type SessionModalView = 'welcome' | 'saved_sessions' | 'create_new';
 
@@ -36,6 +40,13 @@ interface ProjectSessionModalProps {
   onDeleteProject: (projectId: string) => void;
   onDuplicateProject: (project: FluxProject) => void;
   onRenameProject: (projectId: string, newTitle: string) => void;
+  currentUserEmail: string;
+  teamMembers: TeamMember[];
+  onChangeVisibility: (
+    projectId: string,
+    visibility: SessionVisibility,
+    sharedWith: string[]
+  ) => void;
 }
 
 export const ProjectSessionModal: React.FC<ProjectSessionModalProps> = ({
@@ -49,7 +60,11 @@ export const ProjectSessionModal: React.FC<ProjectSessionModalProps> = ({
   onDeleteProject,
   onDuplicateProject,
   onRenameProject,
+  currentUserEmail,
+  teamMembers,
+  onChangeVisibility,
 }) => {
+  const [sharePopoverId, setSharePopoverId] = useState<string | null>(null);
   const [view, setView] = useState<SessionModalView>(initialView);
   const [searchQuery, setSearchQuery] = useState('');
   const [newProjectTitle, setNewProjectTitle] = useState('');
@@ -152,7 +167,7 @@ export const ProjectSessionModal: React.FC<ProjectSessionModalProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-semibold text-sm tracking-tight text-white">
-                  FLUX Studio
+                  Studio52
                 </span>
                 <span className="text-[11px] text-neutral-400">
                   {view === 'welcome'
@@ -219,7 +234,7 @@ export const ProjectSessionModal: React.FC<ProjectSessionModalProps> = ({
           <div className="p-6 sm:p-8 flex-1 overflow-y-auto space-y-6">
             <div className="text-center max-w-lg mx-auto space-y-1.5 pt-2">
               <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-white">
-                FLUX Video Studio
+                52 Video Studio
               </h1>
               <p className="text-xs sm:text-sm text-neutral-400 leading-relaxed">
                 High-fidelity video synthesis and multi-frame direction. Continue an existing session or begin a new composition.
@@ -426,10 +441,37 @@ export const ProjectSessionModal: React.FC<ProjectSessionModalProps> = ({
                           </div>
 
                           {/* Top Badges */}
-                          {isCurrent && (
-                            <div className="absolute top-2 left-2">
+                          <div className="absolute top-2 left-2 flex items-center gap-1.5">
+                            {isCurrent && (
                               <span className="text-[10px] font-medium px-2 py-0.5 rounded-md bg-neutral-900/80 backdrop-blur-md text-white border border-white/20">
                                 Current
+                              </span>
+                            )}
+                            {(() => {
+                              const vis = project.visibility ?? 'private';
+                              const Icon =
+                                vis === 'private' ? Lock : vis === 'team' ? Users : UserPlus;
+                              const label =
+                                vis === 'private'
+                                  ? 'Private'
+                                  : vis === 'team'
+                                  ? 'Team'
+                                  : `Shared (${project.sharedWith?.length ?? 0})`;
+                              return (
+                                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-md bg-black/70 backdrop-blur-md text-neutral-200 border border-white/15 flex items-center gap-1">
+                                  <Icon className="w-2.5 h-2.5" />
+                                  {label}
+                                </span>
+                              );
+                            })()}
+                          </div>
+                          {project.isOwner === false && (
+                            <div className="absolute top-2 right-2">
+                              <span
+                                className="text-[10px] font-medium px-1.5 py-0.5 rounded-md bg-black/70 backdrop-blur-md text-neutral-300 border border-white/15"
+                                title={`Owned by ${project.ownerEmail}`}
+                              >
+                                Shared with you
                               </span>
                             </div>
                           )}
@@ -504,6 +546,38 @@ export const ProjectSessionModal: React.FC<ProjectSessionModalProps> = ({
                             </div>
 
                             <div className="flex items-center gap-1">
+                              {/* Share (owner only) */}
+                              {project.isOwner !== false && (
+                                <div className="relative">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setSharePopoverId(
+                                        sharePopoverId === project.id ? null : project.id
+                                      );
+                                    }}
+                                    className={`p-1 rounded hover:bg-white/5 transition-colors ${
+                                      (project.visibility ?? 'private') !== 'private'
+                                        ? 'text-emerald-400 hover:text-emerald-300'
+                                        : 'text-neutral-400 hover:text-white'
+                                    }`}
+                                    title="Share settings"
+                                  >
+                                    <UserPlus className="w-3 h-3" />
+                                  </button>
+                                  {sharePopoverId === project.id && (
+                                    <ShareControl
+                                      project={project}
+                                      teamMembers={teamMembers}
+                                      currentUserEmail={currentUserEmail}
+                                      onClose={() => setSharePopoverId(null)}
+                                      onChangeVisibility={onChangeVisibility}
+                                    />
+                                  )}
+                                </div>
+                              )}
+
                               {/* Duplicate */}
                               <button
                                 type="button"
@@ -524,15 +598,17 @@ export const ProjectSessionModal: React.FC<ProjectSessionModalProps> = ({
                                 <Download className="w-3 h-3" />
                               </button>
 
-                              {/* Delete */}
-                              <button
-                                type="button"
-                                onClick={() => onDeleteProject(project.id)}
-                                className="p-1 text-neutral-500 hover:text-rose-400 rounded hover:bg-white/5 transition-colors"
-                                title="Delete session"
-                              >
-                                <Trash2 className="w-3 h-3" />
-                              </button>
+                              {/* Delete (owner only) */}
+                              {project.isOwner !== false && (
+                                <button
+                                  type="button"
+                                  onClick={() => onDeleteProject(project.id)}
+                                  className="p-1 text-neutral-500 hover:text-rose-400 rounded hover:bg-white/5 transition-colors"
+                                  title="Delete session"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </button>
+                              )}
 
                               {/* Open Button */}
                               <button

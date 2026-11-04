@@ -17,6 +17,22 @@ export default defineConfig(() => {
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      // Forward API, auth, and admin routes to the Express server (which holds
+      // FAL_KEY, the session, and the SQLite DB).
+      proxy: {
+        '/api': {
+          target: `http://localhost:${process.env.FAL_PROXY_PORT || 3001}`,
+          changeOrigin: true,
+        },
+        '/auth': {
+          target: `http://localhost:${process.env.FAL_PROXY_PORT || 3001}`,
+          changeOrigin: true,
+        },
+        '/admin': {
+          target: `http://localhost:${process.env.FAL_PROXY_PORT || 3001}`,
+          changeOrigin: true,
+        },
+      },
     },
   };
 });

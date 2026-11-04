@@ -13,22 +13,24 @@ import {
 } from './fluxVideoUtils';
 import { TimelineKeyframe } from '../types/flux';
 
-test('calculateCost computes draft vs final costs accurately', () => {
-  const draft5s = calculateCost(5, 'draft', false, 30);
-  assert.equal(draft5s.dollars, 0.30);
-  assert.ok(draft5s.credits > 0);
-  assert.match(draft5s.formatted, /\$0\.30/);
-
-  const final5s = calculateCost(5, 'final', false, 30);
-  assert.equal(final5s.dollars, 2.50);
-  assert.equal(final5s.credits, 625); // 2.50 / 0.004 = 625 credits
-  assert.match(final5s.formatted, /\$2\.50/);
+test('calculateCost matches fal token pricing for Seedance 2.0 480p/5s', () => {
+  // 10,179 tokens/s * 5s = 50,895 tokens; * $0.0112/1k ≈ $0.57 (real charge).
+  const draft5s = calculateCost('seedance-2.0', 5, 'draft');
+  assert.equal(draft5s.dollars, 0.57);
+  assert.equal(draft5s.tokens, 50895);
+  assert.match(draft5s.formatted, /\$0\.57/);
 });
 
-test('calculateCost scales with inference steps', () => {
-  const normalSteps = calculateCost(5, 'final', false, 30);
-  const highSteps = calculateCost(5, 'final', false, 50);
-  assert.ok(highSteps.dollars > normalSteps.dollars);
+test('calculateCost is higher for 2.5 final (1080p) than 2.0 draft', () => {
+  const twoOhDraft = calculateCost('seedance-2.0', 5, 'draft');
+  const twoFiveFinal = calculateCost('seedance-2.5', 5, 'final');
+  assert.ok(twoFiveFinal.dollars > twoOhDraft.dollars);
+});
+
+test('calculateCost scales linearly with duration', () => {
+  const five = calculateCost('seedance-2.0', 5, 'draft');
+  const ten = calculateCost('seedance-2.0', 10, 'draft');
+  assert.ok(Math.abs(ten.dollars - five.dollars * 2) < 0.02);
 });
 
 test('formatTimecode outputs accurate MM:SS:FF at 24fps', () => {

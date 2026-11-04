@@ -153,11 +153,17 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
   const totalFrames = Math.round(duration * fps);
 
   // Aspect ratio container sizing
-  const containerAspectClass = {
+  const containerAspectClass = ({
     '16:9': 'aspect-video max-w-3xl max-h-[400px]',
-    '9:16': 'aspect-[9/16] max-h-[400px] w-auto',
+    '21:9': 'aspect-[21/9] max-w-3xl max-h-[400px]',
+    '2:1': 'aspect-[2/1] max-w-3xl max-h-[400px]',
+    '4:3': 'aspect-[4/3] max-h-[400px] w-auto',
     '1:1': 'aspect-square max-h-[400px] w-auto',
-  }[aspectRatio];
+    '3:4': 'aspect-[3/4] max-h-[400px] w-auto',
+    '9:16': 'aspect-[9/16] max-h-[400px] w-auto',
+    // "auto" lets the model choose; show a standard landscape frame.
+    auto: 'aspect-video max-w-3xl max-h-[400px]',
+  } satisfies Record<AspectRatio, string>)[aspectRatio];
 
   return (
     <div
@@ -190,7 +196,7 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
       </div>
 
       {/* Main Video Viewport */}
-      <div className="flex-1 flex items-center justify-center p-4 relative bg-black min-h-[340px]">
+      <div className="flex-1 flex items-center justify-center p-4 relative bg-black min-h-[300px]">
         {/* Aspect Ratio Box */}
         <div
           className={`w-full relative rounded-xl overflow-hidden shadow-2xl bg-neutral-950 border border-white/[0.08] flex items-center justify-center transition-all duration-300 ${containerAspectClass}`}
@@ -207,7 +213,7 @@ export const StagePreview: React.FC<StagePreviewProps> = ({
               onLoadedMetadata={handleLoadedMetadata}
               onEnded={() => setIsPlaying(false)}
               onClick={togglePlay}
-              className="w-full h-full object-cover cursor-pointer"
+              className="w-full h-full object-contain cursor-pointer bg-black"
             />
           ) : (
             <div className="flex flex-col items-center justify-center p-6 text-center text-neutral-500 space-y-2">

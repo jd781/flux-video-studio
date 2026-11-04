@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   Type,
   Image as ImageIcon,
@@ -15,16 +15,50 @@ import {
   Smartphone,
   Square,
   Sparkles,
+  Images,
+  RectangleHorizontal,
+  RectangleVertical,
 } from 'lucide-react';
 import {
   AspectRatio,
-  DurationSeconds,
   FluxGenerationParams,
+  ModelFamily,
+  ModelId,
+  ModelResolution,
+  ReferenceTask,
   TimelineKeyframe,
   WorkflowMode,
 } from '../types/flux';
 import { MediaDropzones } from './MediaDropzones';
 import { generateRandomSeed } from '../utils/fluxVideoUtils';
+import {
+  MODEL_FAMILIES,
+  clampDurationForModel,
+  getAvailableResolutions,
+  getFamily,
+  getModel,
+  resolveOutputResolution,
+} from '../utils/modelCatalog';
+import { flux3KindForMode, flux3RatePerSecond } from '../utils/flux3';
+
+const ASPECT_META: Record<AspectRatio, { label: string; icon: React.ElementType }> = {
+  '16:9': { label: '16:9', icon: Maximize2 },
+  '9:16': { label: '9:16', icon: Smartphone },
+  '1:1': { label: '1:1', icon: Square },
+  '21:9': { label: '21:9', icon: RectangleHorizontal },
+  '2:1': { label: '2:1', icon: RectangleHorizontal },
+  '4:3': { label: '4:3', icon: RectangleHorizontal },
+  '3:4': { label: '3:4', icon: RectangleVertical },
+  auto: { label: 'Auto', icon: Sparkles },
+};
+
+const RESOLUTION_LABEL: Record<ModelResolution, string> = {
+  '480p': '480p',
+  '720p': '720p',
+  '1080p': '1080p',
+  '1440p': '2K',
+  '2160p': '4K',
+};
 
 interface ControlsPanelProps {
   params: FluxGenerationParams;
@@ -41,7 +75,15 @@ const WORKFLOW_TABS: {
   { id: 'image_to_video', label: 'Image to Video', icon: ImageIcon },
   { id: 'first_last_frame', label: 'Keyframe Pair', icon: SplitSquareVertical },
   { id: 'keyframes_timeline', label: 'Timeline', icon: Clock },
+  { id: 'reference_to_video', label: 'Reference', icon: Images },
   { id: 'video_extend', label: 'Extend & Edit', icon: Film },
+];
+
+const REFERENCE_TASKS: { id: ReferenceTask; label: string; hint: string }[] = [
+  { id: 'reference', label: 'Reference', hint: 'Use media as guidance' },
+  { id: 'editing', label: 'Edit', hint: 'Modify a reference video' },
+  { id: 'extension', label: 'Extend', hint: 'Continue a reference video' },
+  { id: 'auto', label: 'Auto', hint: 'Let the model decide' },
 ];
 
 const CAMERA_TAGS = [
@@ -61,9 +103,86 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
   disabled = false,
 }) => {
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const promptRef = useRef<HTMLTextAreaElement>(null);
+
+  const model = getModel(params.modelId);
+  const family = getFamily(params.modelId);
+  const visibleTabs = WORKFLOW_TABS.filter((tab) =>
+    model.workflowModes.includes(tab.id)
+  );
+
+  // FLUX 3 specifics, derived from the model's capabilities.
+  const safetyTolerance = params.safetyTolerance ?? 2;
+  const effectiveResolution = resolveOutputResolution(params);
+  // What Full Quality would render at, regardless of the tier currently selected.
+  const finalResolution = resolveOutputResolution({ ...params, qualityTier: 'final' });
+  const availableResolutions = getAvailableResolutions(
+    params.modelId,
+    params.workflowMode
+  );
+  const fluxKind = flux3KindForMode(params.workflowMode);
+  const ratePerSecond =
+    model.family === 'flux-3' && fluxKind
+      ? flux3RatePerSecond(fluxKind, effectiveResolution, params.qualityTier === 'draft')
+      : null;
+
+  const handleModelChange = (modelId: ModelId) => {
+    const next = getModel(modelId);
+
+    // Keep the current duration if the new model allows it; otherwise snap to
+    // the nearest value it does allow.
+    const clamped = clampDurationForModel(modelId, params.duration);
+    const duration =
+      next.durationRange || next.durations.includes(clamped)
+        ? clamped
+        : next.durations.reduce(
+            (best, d) =>
+              Math.abs(d - clamped) < Math.abs(best - clamped) ? d : best,
+            next.durations[0]
+          );
+
+    const workflowMode = next.workflowModes.includes(params.workflowMode)
+      ? params.workflowMode
+      : next.workflowModes[0];
+
+    const aspectRatio = next.aspectRatios.includes(params.aspectRatio)
+      ? params.aspectRatio
+      : next.aspectRatios.includes('16:9')
+      ? '16:9'
+      : next.aspectRatios[0];
+
+    // A chosen resolution only carries over if the new model/mode offers it.
+    const keepResolution =
+      next.resolutionSelectable &&
+      params.resolution &&
+      getAvailableResolutions(modelId, workflowMode).includes(params.resolution);
+
+    onChangeParams({
+      modelId,
+      duration,
+      workflowMode,
+      aspectRatio,
+      resolution: keepResolution ? params.resolution : undefined,
+      safetyTolerance: params.safetyTolerance ?? 2,
+    });
+  };
+
+  // Switching family jumps to that family's default version.
+  const handleFamilyChange = (familyId: ModelFamily) => {
+    if (familyId === model.family) return;
+    handleModelChange(MODEL_FAMILIES[familyId].defaultModelId);
+  };
 
   const handleModeChange = (mode: WorkflowMode) => {
-    onChangeParams({ workflowMode: mode });
+    const patch: Partial<FluxGenerationParams> = { workflowMode: mode };
+    // Some resolutions are only offered for certain workflows (FLUX 3).
+    if (
+      params.resolution &&
+      !getAvailableResolutions(params.modelId, mode).includes(params.resolution)
+    ) {
+      patch.resolution = undefined;
+    }
+    onChangeParams(patch);
   };
 
   const handleAddCameraTag = (tag: string) => {
@@ -80,6 +199,43 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
     onChangeParams({ seed: newSeed });
   };
 
+  // Insert a reference tag (e.g. "@Image1") at the textarea caret, or append to
+  // the end if the caret position is unknown. Surrounding spaces are added only
+  // where needed so the tag reads inline. Caret is restored after the tag.
+  const handleInsertPromptTag = (tag: string) => {
+    const el = promptRef.current;
+    const current = params.prompt;
+
+    // selectionStart/End persist even while the textarea is blurred, so a click
+    // on a thumbnail still gives us the last caret position.
+    const hasSelection =
+      el && el.selectionStart != null && el.selectionEnd != null;
+    const start = hasSelection ? el.selectionStart : current.length;
+    const end = hasSelection ? el.selectionEnd : current.length;
+
+    const before = current.slice(0, start);
+    const after = current.slice(end);
+
+    // Add a leading space if the char before isn't whitespace, and a trailing
+    // space if the char after isn't whitespace (and isn't end-of-string + already spaced).
+    const needLead = before.length > 0 && !/\s$/.test(before);
+    const needTrail = after.length === 0 || !/^\s/.test(after);
+    const insert = `${needLead ? ' ' : ''}${tag}${needTrail ? ' ' : ''}`;
+
+    const next = before + insert + after;
+    onChangeParams({ prompt: next });
+
+    // Restore focus and place the caret right after the inserted tag.
+    const caret = (before + insert).length;
+    requestAnimationFrame(() => {
+      const node = promptRef.current;
+      if (node) {
+        node.focus();
+        node.setSelectionRange(caret, caret);
+      }
+    });
+  };
+
   return (
     <div className="flex flex-col h-full bg-neutral-950 text-neutral-100 overflow-y-auto">
       {/* Panel Header */}
@@ -88,18 +244,89 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
           Studio Controls
         </span>
         <span className="text-[10px] font-mono text-neutral-500">
-          FLUX.1 Turbo
+          {model.label}
         </span>
       </div>
 
       <div className="p-4 sm:p-5 space-y-6 flex-1">
+        {/* Model family (provider) dropdown */}
+        <div className="space-y-2">
+          <label
+            htmlFor="model-family"
+            className="text-[11px] font-semibold tracking-wider uppercase text-neutral-400 block"
+          >
+            Model
+          </label>
+          <div className="relative">
+            <select
+              id="model-family"
+              value={model.family}
+              onChange={(e) => handleFamilyChange(e.target.value as ModelFamily)}
+              disabled={disabled}
+              className="w-full appearance-none bg-neutral-900 border border-white/10 rounded-xl pl-3 pr-9 py-2.5 text-xs font-medium text-white focus:outline-none focus:border-white/30 transition-colors disabled:opacity-50 cursor-pointer"
+            >
+              {Object.values(MODEL_FAMILIES).map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
+            <ChevronDown className="w-3.5 h-3.5 text-neutral-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+          </div>
+          <p className="text-[10px] text-neutral-500 leading-relaxed">
+            {family.tagline}
+          </p>
+        </div>
+
+        {/* Model version selector (within the chosen family) */}
+        <div className="space-y-2">
+          <label className="text-[11px] font-semibold tracking-wider uppercase text-neutral-400 block">
+            Generation Model
+          </label>
+          <div
+            className="grid gap-1.5 p-1 bg-neutral-900/80 rounded-xl border border-white/[0.08]"
+            style={{
+              gridTemplateColumns: `repeat(${family.modelIds.length}, minmax(0, 1fr))`,
+            }}
+          >
+            {family.modelIds.map((id) => getModel(id)).map((m) => {
+              const isActive = params.modelId === m.id;
+              return (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => handleModelChange(m.id)}
+                  disabled={disabled}
+                  className={`p-2.5 rounded-lg text-left transition-all ${
+                    isActive
+                      ? 'bg-neutral-800 text-white border border-white/15 shadow-xs'
+                      : 'text-neutral-400 hover:text-white border border-transparent'
+                  }`}
+                  title={m.tagline}
+                >
+                  <div className="text-xs font-semibold text-white leading-tight">
+                    {m.label}
+                  </div>
+                  <div className="text-[10px] text-neutral-400 mt-0.5 leading-tight">
+                    {m.tagline}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         {/* Workflow Mode Selector */}
         <div className="space-y-2">
           <label className="text-[11px] font-semibold tracking-wider uppercase text-neutral-400 block">
             Workflow Mode
           </label>
-          <div className="grid grid-cols-5 gap-1 p-1 bg-neutral-900/80 rounded-xl border border-white/[0.08]">
-            {WORKFLOW_TABS.map((tab) => {
+          <div
+            className={`grid gap-1 p-1 bg-neutral-900/80 rounded-xl border border-white/[0.08] ${
+              visibleTabs.length >= 6 ? 'grid-cols-6' : 'grid-cols-5'
+            }`}
+          >
+            {visibleTabs.map((tab) => {
               const Icon = tab.icon;
               const isActive = params.workflowMode === tab.id;
               return (
@@ -136,12 +363,16 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
           <MediaDropzones
             workflowMode={params.workflowMode}
             duration={params.duration}
+            maxReferenceImages={model.maxReferenceImages}
+            maxReferenceVideos={model.maxReferenceVideos}
             startFrameUrl={params.startFrameUrl}
             endFrameUrl={params.endFrameUrl}
             keyframes={params.keyframes}
             sourceVideoUrl={params.sourceVideoUrl}
             sourceVideoName={params.sourceVideoName}
             referenceImages={params.referenceImages || []}
+            referenceVideos={params.referenceVideos || []}
+            showFrameIndex={model.family === 'flux-3'}
             onUpdateStartFrame={(url) => onChangeParams({ startFrameUrl: url })}
             onUpdateEndFrame={(url) => onChangeParams({ endFrameUrl: url })}
             onUpdateKeyframes={(kfs: TimelineKeyframe[]) => onChangeParams({ keyframes: kfs })}
@@ -149,8 +380,46 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
               onChangeParams({ sourceVideoUrl: url, sourceVideoName: name })
             }
             onUpdateReferenceImages={(imgs) => onChangeParams({ referenceImages: imgs })}
+            onUpdateReferenceVideos={(vids) => onChangeParams({ referenceVideos: vids })}
+            onInsertPromptTag={handleInsertPromptTag}
           />
         </div>
+
+        {/* Reference Task Mode (Seedance 2.5 reference-to-video only) */}
+        {params.workflowMode === 'reference_to_video' && model.supportsTaskMode && (
+          <div className="space-y-2">
+            <label className="text-[11px] font-semibold tracking-wider uppercase text-neutral-400 block">
+              Reference Task
+            </label>
+            <div className="grid grid-cols-4 gap-1.5 p-1 bg-neutral-900/80 rounded-xl border border-white/[0.08]">
+              {REFERENCE_TASKS.map((t) => {
+                const isActive = (params.referenceTask || 'reference') === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => onChangeParams({ referenceTask: t.id })}
+                    disabled={disabled}
+                    className={`py-1.5 rounded-lg text-xs transition-all ${
+                      isActive
+                        ? 'bg-neutral-800 text-white font-semibold shadow-xs'
+                        : 'text-neutral-400 hover:text-white'
+                    }`}
+                    title={t.hint}
+                  >
+                    {t.label}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[10px] text-neutral-500 leading-relaxed">
+              Attach up to {model.maxReferenceImages} reference images (and a video)
+              and refer to them in your prompt as{' '}
+              <span className="font-mono text-neutral-400">@Image1</span>,{' '}
+              <span className="font-mono text-neutral-400">@Video1</span>, etc.
+            </p>
+          </div>
+        )}
 
         {/* Prompt & Audio Direction */}
         <div className="space-y-3">
@@ -165,6 +434,7 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
 
           <div className="space-y-2">
             <textarea
+              ref={promptRef}
               rows={3}
               value={params.prompt}
               disabled={disabled}
@@ -252,12 +522,15 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
               <span className="text-xs text-neutral-300">Aspect Ratio</span>
               <span className="text-[10px] text-neutral-500 font-mono">{params.aspectRatio}</span>
             </div>
-            <div className="grid grid-cols-3 gap-1.5 p-1 bg-neutral-900/80 rounded-xl border border-white/[0.08]">
-              {[
-                { id: '16:9' as AspectRatio, label: '16:9', icon: Maximize2 },
-                { id: '9:16' as AspectRatio, label: '9:16', icon: Smartphone },
-                { id: '1:1' as AspectRatio, label: '1:1', icon: Square },
-              ].map((item) => {
+            <div
+              className="grid gap-1.5 p-1 bg-neutral-900/80 rounded-xl border border-white/[0.08]"
+              style={{
+                gridTemplateColumns: `repeat(${Math.min(model.aspectRatios.length, 4)}, minmax(0, 1fr))`,
+              }}
+            >
+              {model.aspectRatios
+                .map((id) => ({ id, ...ASPECT_META[id] }))
+                .map((item) => {
                 const Icon = item.icon;
                 const isActive = params.aspectRatio === item.id;
                 return (
@@ -286,8 +559,13 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
               <span className="text-xs text-neutral-300">Duration</span>
               <span className="text-[10px] text-neutral-500 font-mono">{params.duration} seconds</span>
             </div>
-            <div className="grid grid-cols-4 gap-1.5 p-1 bg-neutral-900/80 rounded-xl border border-white/[0.08]">
-              {([5, 10, 15, 20] as DurationSeconds[]).map((dur) => {
+            <div
+              className="grid gap-1.5 p-1 bg-neutral-900/80 rounded-xl border border-white/[0.08]"
+              style={{
+                gridTemplateColumns: `repeat(${model.durations.length}, minmax(0, 1fr))`,
+              }}
+            >
+              {model.durations.map((dur) => {
                 const isActive = params.duration === dur;
                 return (
                   <button
@@ -306,6 +584,22 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
                 );
               })}
             </div>
+            {/* Any whole second in the model's range (FLUX 3: 5-20s) */}
+            {model.durationRange && (
+              <input
+                type="range"
+                min={model.durationRange.min}
+                max={model.durationRange.max}
+                step={1}
+                value={params.duration}
+                disabled={disabled}
+                onChange={(e) =>
+                  onChangeParams({ duration: parseInt(e.target.value, 10) })
+                }
+                className="w-full cursor-pointer"
+                aria-label="Duration in seconds"
+              />
+            )}
           </div>
 
           {/* Quality Tier Selector */}
@@ -330,17 +624,21 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
                 }`}
               >
                 <div className="flex items-center justify-between mb-0.5">
-                  <span className="text-xs font-semibold text-white">Draft (480p)</span>
+                  <span className="text-xs font-semibold text-white">
+                    Draft ({model.draftResolution})
+                  </span>
                   <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-neutral-700/60 text-neutral-300 font-medium">
                     Fast
                   </span>
                 </div>
                 <div className="text-[11px] text-neutral-400 font-mono">
-                  ~$0.30 • 5x faster
+                  {model.supportsDraftEnhance
+                    ? 'Cheap preview • enhance later'
+                    : 'Faster preview'}
                 </div>
               </button>
 
-              {/* Full Quality (1080p) */}
+              {/* Full Quality (model-dependent) */}
               <button
                 type="button"
                 onClick={() => onChangeParams({ qualityTier: 'final' })}
@@ -352,16 +650,63 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
                 }`}
               >
                 <div className="flex items-center justify-between mb-0.5">
-                  <span className="text-xs font-semibold text-white">Full Quality (1080p)</span>
+                  <span className="text-xs font-semibold text-white">
+                    Full Quality ({RESOLUTION_LABEL[finalResolution]})
+                  </span>
                   <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-white/15 text-white font-medium">
                     HD
                   </span>
                 </div>
                 <div className="text-[11px] text-neutral-400 font-mono">
-                  ~$2.50 • Production
+                  Production master
                 </div>
               </button>
             </div>
+
+            {/* Output resolution (models that let you choose, e.g. FLUX 3) */}
+            {model.resolutionSelectable && params.qualityTier === 'final' && (
+              <div className="space-y-1.5 pt-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-neutral-300">Output Resolution</span>
+                  {ratePerSecond !== null && (
+                    <span className="text-[10px] text-neutral-500 font-mono">
+                      ~${ratePerSecond.toFixed(2)}/sec
+                    </span>
+                  )}
+                </div>
+                <div
+                  className="grid gap-1.5 p-1 bg-neutral-900/80 rounded-xl border border-white/[0.08]"
+                  style={{
+                    gridTemplateColumns: `repeat(${availableResolutions.length}, minmax(0, 1fr))`,
+                  }}
+                >
+                  {availableResolutions.map((res) => {
+                    const isActive = finalResolution === res;
+                    return (
+                      <button
+                        key={res}
+                        type="button"
+                        onClick={() => onChangeParams({ resolution: res })}
+                        disabled={disabled}
+                        className={`py-1.5 rounded-lg text-xs font-mono transition-all ${
+                          isActive
+                            ? 'bg-neutral-800 text-white font-semibold shadow-xs'
+                            : 'text-neutral-400 hover:text-white'
+                        }`}
+                        title={res}
+                      >
+                        {RESOLUTION_LABEL[res]}
+                      </button>
+                    );
+                  })}
+                </div>
+                {availableResolutions.length < model.resolutions.length && (
+                  <p className="text-[10px] text-neutral-500 leading-relaxed">
+                    2K and 4K are available for Text to Video and Image to Video.
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -388,6 +733,42 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
 
           {showAdvanced && (
             <div className="mt-2 p-3.5 bg-neutral-900/60 border border-white/[0.08] rounded-xl space-y-4 text-xs">
+              {/* Content filter strictness (FLUX 3 safety_tolerance) */}
+              {model.supportsSafetyTolerance && (
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-neutral-300">Content Filter Strictness</span>
+                    <span className="font-mono text-white text-[11px]">
+                      {safetyTolerance}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="4"
+                    step="1"
+                    value={safetyTolerance}
+                    disabled={disabled}
+                    onChange={(e) =>
+                      onChangeParams({ safetyTolerance: parseInt(e.target.value, 10) })
+                    }
+                    className="w-full cursor-pointer"
+                    aria-label="Content filter strictness"
+                  />
+                  <div className="flex justify-between text-[10px] text-neutral-500 font-mono">
+                    <span>Strictest (0)</span>
+                    <span>Most permissive (4)</span>
+                  </div>
+                  <p className="text-[10px] text-neutral-500 leading-relaxed">
+                    Default is 2. Higher values let more through the model’s content
+                    filter; the provider still enforces its own usage policy.
+                  </p>
+                </div>
+              )}
+
+              {/* Seedance-style controls (not part of FLUX 3's API) */}
+              {model.family !== 'flux-3' && (
+              <>
               {/* Guidance Scale */}
               <div className="space-y-1">
                 <div className="flex items-center justify-between">
@@ -460,7 +841,11 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
                 </div>
               </div>
 
-              {/* Seed */}
+              </>
+              )}
+
+              {/* Seed (FLUX 3's API has no seed input) */}
+              {model.supportsSeed && (
               <div className="space-y-1.5 pt-1 border-t border-white/[0.06]">
                 <div className="flex items-center justify-between">
                   <span className="text-neutral-300">Generation Seed</span>
@@ -484,6 +869,7 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
                   className="w-full bg-neutral-950 border border-white/10 rounded-lg px-2.5 py-1 text-xs font-mono text-white focus:outline-none focus:border-white/30"
                 />
               </div>
+              )}
             </div>
           )}
         </div>
