@@ -6,6 +6,7 @@ import {
   type Profile,
 } from 'passport-google-oauth20';
 import { upsertUser } from './db';
+import { SqliteSessionStore } from './sessionStore';
 
 /**
  * Google OAuth authentication, restricted to @52launch.com accounts.
@@ -58,6 +59,7 @@ export function configureAuth(app: Express): void {
   app.use(
     session({
       name: 'flux.sid',
+      store: new SqliteSessionStore(),
       secret: SESSION_SECRET || 'dev-insecure-secret-change-me',
       resave: false,
       saveUninitialized: false,

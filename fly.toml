@@ -1,8 +1,8 @@
 # Fly.io config for FLUX Video Studio.
 #
-# Single-machine deployment: the app uses SQLite on a mounted volume and an
-# in-process session store, so it must run on ONE machine. Do not scale the
-# web process beyond 1 without moving to Postgres + a shared session store.
+# Single-machine deployment: the app uses SQLite (data and login sessions) on a
+# mounted volume, so it must run on ONE machine. Do not scale the web process
+# beyond 1 without moving to Postgres.
 
 app = "52-video-studio"
 primary_region = "iad"          # pick a region near your team (fly platform regions)

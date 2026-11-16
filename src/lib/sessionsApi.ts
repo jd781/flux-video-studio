@@ -3,6 +3,7 @@ import {
   SessionVisibility,
   TeamMember,
 } from '../types/flux';
+import { stripTakeInlineMedia } from '../utils/stripInlineMedia';
 
 /**
  * Client for the server-backed sessions API. Sessions (studios) are persisted
@@ -90,7 +91,7 @@ export async function createSessionRemote(
       description: project.description,
       folder: project.folder,
       params: project.params,
-      takes: project.takes,
+      takes: stripTakeInlineMedia(project.takes),
       currentTakeId: project.currentTakeId,
       thumbnailUrl: project.thumbnailUrl,
       isStarred: project.isStarred,
@@ -111,7 +112,7 @@ export async function updateSessionRemote(
         description: project.description,
         folder: project.folder,
         params: project.params,
-        takes: project.takes,
+        takes: stripTakeInlineMedia(project.takes),
         currentTakeId: project.currentTakeId,
         thumbnailUrl: project.thumbnailUrl,
         isStarred: project.isStarred,

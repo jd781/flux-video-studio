@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
+import { stripTakeInlineMedia } from '../src/utils/stripInlineMedia';
 
 /**
  * SQLite persistence for users and generation usage.
@@ -108,6 +109,42 @@ export interface GenerationRow {
   cost_usd: number;
   status: string;
   error: string | null;
+}
+
+/**
+ * One-time cleanup: older sessions embedded base64 images in every take's
+ * params snapshot (tens of MB per session). Strip them. A full backup is taken
+ * first (only if something needs changing), so this is reversible.
+ */
+export function compactSessions(): void {
+  const rows = db
+    .prepare(`SELECT id, takes FROM sessions WHERE takes LIKE '%"data:%'`)
+    .all() as Array<{ id: string; takes: string }>;
+  // Thumbnails (posterUrl) are legitimately data: URLs, so only rows whose
+  // stripped form is actually smaller need work.
+  const changed: Array<{ id: string; before: number; next: string }> = [];
+  for (const r of rows) {
+    const next = JSON.stringify(stripTakeInlineMedia(JSON.parse(r.takes)));
+    if (next.length < r.takes.length) {
+      changed.push({ id: r.id, before: r.takes.length, next });
+    }
+  }
+  if (changed.length === 0) return;
+
+  const backup = path.join(DATA_DIR, `app.pre-compact-${Date.now()}.db`);
+  db.exec(`VACUUM INTO '${backup.replace(/'/g, "''")}'`);
+  console.log(`[db] backup written to ${backup}`);
+
+  const update = db.prepare(`UPDATE sessions SET takes = ? WHERE id = ?`);
+  db.transaction(() => {
+    for (const c of changed) update.run(c.next, c.id);
+  })();
+  db.pragma('wal_checkpoint(TRUNCATE)');
+  const before = changed.reduce((n, c) => n + c.before, 0);
+  const after = changed.reduce((n, c) => n + c.next.length, 0);
+  console.log(
+    `[db] compacted ${changed.length} sessions: ${(before / 1e6).toFixed(1)}MB -> ${(after / 1e6).toFixed(1)}MB`
+  );
 }
 
 /** Insert or update a user on login. */
@@ -426,7 +463,7 @@ export function createSession(input: UpsertSessionInput): SessionRow {
     description: input.description ?? null,
     folder: input.folder ?? null,
     params: JSON.stringify(input.params),
-    takes: JSON.stringify(input.takes ?? []),
+    takes: JSON.stringify(stripTakeInlineMedia(input.takes ?? [])),
     current_take_id: input.currentTakeId ?? null,
     thumbnail_url: input.thumbnailUrl ?? null,
     visibility: input.visibility ?? 'private',
@@ -473,7 +510,9 @@ export function updateSessionContent(
     params:
       patch.params !== undefined ? JSON.stringify(patch.params) : existing.params,
     takes:
-      patch.takes !== undefined ? JSON.stringify(patch.takes) : existing.takes,
+      patch.takes !== undefined
+        ? JSON.stringify(stripTakeInlineMedia(patch.takes))
+        : existing.takes,
     current_take_id:
       patch.currentTakeId !== undefined
         ? patch.currentTakeId

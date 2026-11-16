@@ -28,6 +28,7 @@ import {
   deleteSession,
   sessionToDTO,
   listTeamMembers,
+  compactSessions,
   type SessionVisibility,
 } from './db';
 import {
@@ -551,6 +552,12 @@ if (isProd) {
   } else {
     console.warn('[server] dist/ not found; run `npm run build` before production start.');
   }
+}
+
+try {
+  compactSessions();
+} catch (err) {
+  console.error('[db] compactSessions failed (continuing):', err);
 }
 
 app.listen(PORT, () => {
