@@ -9,8 +9,9 @@ import {
   VideoTake,
   WorkflowMode,
 } from '../types/flux';
-import { getModel, resolveOutputResolution } from './modelCatalog';
+import { effectiveDuration, getModel, resolveOutputResolution } from './modelCatalog';
 import { flux3Cost, flux3KindForMode } from './flux3';
+import { isPerSecondModel, perSecondCost, pricingKindForMode } from './perSecondPricing';
 
 /**
  * Estimated fal.ai cost for a generation, matching the server's token-based
@@ -44,8 +45,36 @@ export function calculateCost(
   modelId: ModelId,
   duration: DurationSeconds,
   qualityTier: QualityTier,
-  opts: { workflowMode?: WorkflowMode; resolution?: ModelResolution } = {}
+  opts: {
+    workflowMode?: WorkflowMode;
+    resolution?: ModelResolution;
+    nativeAudio?: boolean;
+    /** A source/reference video is attached (Kling bills these at a different rate). */
+    hasVideoInput?: boolean;
+  } = {}
 ): { dollars: number; tokens: number; formatted: string } {
+  if (isPerSecondModel(modelId)) {
+    const mode: WorkflowMode = opts.workflowMode ?? 'text_to_video';
+    const resolution = resolveOutputResolution({
+      modelId,
+      qualityTier,
+      workflowMode: mode,
+      resolution: opts.resolution,
+    });
+    const dollars =
+      Math.round(
+        perSecondCost({
+          modelId,
+          kind: pricingKindForMode(mode),
+          resolution,
+          durationSeconds: effectiveDuration(modelId, mode, duration),
+          audio: opts.nativeAudio,
+          hasVideoInput: opts.hasVideoInput,
+        }) * 100
+      ) / 100;
+    return { dollars, tokens: 0, formatted: `~$${dollars.toFixed(2)}` };
+  }
+
   if (getModel(modelId).family === 'flux-3') {
     const mode: WorkflowMode = opts.workflowMode ?? 'text_to_video';
     const kind = flux3KindForMode(mode) ?? 'text';

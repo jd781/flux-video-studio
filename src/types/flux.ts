@@ -4,7 +4,11 @@ export type WorkflowMode =
   | 'first_last_frame'
   | 'keyframes_timeline'
   | 'reference_to_video'
-  | 'video_extend';
+  | 'video_extend'
+  /** Restyle / edit an existing video from a text instruction (Kling, Luma, Gemini). */
+  | 'video_edit'
+  /** Re-frame an existing video into a new aspect ratio (Luma). */
+  | 'video_reframe';
 
 /**
  * Seedance 2.5 reference-to-video task mode.
@@ -34,15 +38,31 @@ export type DurationSeconds = number;
 export type QualityTier = 'draft' | 'final';
 
 /** A provider/family of models, shown in the top "Model" dropdown. */
-export type ModelFamily = 'seedance' | 'flux-3';
+export type ModelFamily =
+  | 'seedance'
+  | 'flux-3'
+  | 'kling'
+  | 'wan'
+  | 'luma'
+  | 'veo'
+  | 'gemini-omni';
 
 /**
  * Which fal.ai video model to generate with. The UI and the fal client both
  * read capabilities from MODEL_CATALOG (see utils/modelCatalog.ts) keyed on this.
  */
-export type ModelId = 'seedance-2.0' | 'seedance-2.5' | 'flux-3';
+export type ModelId =
+  | 'seedance-2.0'
+  | 'seedance-2.5'
+  | 'flux-3'
+  | 'kling-4.0'
+  | 'wan-3.0-prime'
+  | 'luma-ray-3.2'
+  | 'veo-3.1'
+  | 'veo-3.1-fast'
+  | 'gemini-omni-flash';
 
-export type ModelResolution = '480p' | '720p' | '1080p' | '1440p' | '2160p';
+export type ModelResolution = '480p' | '540p' | '720p' | '1080p' | '1440p' | '2160p';
 
 export interface TimelineKeyframe {
   id: string;

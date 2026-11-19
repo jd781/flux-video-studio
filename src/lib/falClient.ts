@@ -7,6 +7,7 @@ import {
 } from '../types/flux';
 import {
   clampDurationForModel,
+  effectiveDuration,
   getModel,
   resolveOutputResolution,
 } from '../utils/modelCatalog';
@@ -348,13 +349,357 @@ async function buildFlux3Request(
   return { endpointId: draft ? `${endpoint}/draft` : endpoint, input };
 }
 
+// ---------------------------------------------------------------------------
+// Kling 4.0, Wan 3.0 Prime, Luma Ray 3.2, Veo 3.1 and Gemini Omni Flash
+//
+// Field names and enums below come from each endpoint's OpenAPI schema on
+// fal.ai. They differ per model (e.g. Kling/Wan take start_image_url, Veo takes
+// image_url and first_frame_url/last_frame_url, Luma/Veo durations are "5s"
+// strings, Veo's 4K resolution is "4k"), so each model has its own builder.
+// ---------------------------------------------------------------------------
+
+type BuiltRequest = { endpointId: string; input: Record<string, unknown> };
+
+/** Requires hosted source video for edit / reframe / extend workflows. */
+async function requireSourceVideo(params: FluxGenerationParams, what: string): Promise<string> {
+  const url = await ensureHostedUrl(params.sourceVideoUrl);
+  if (!url) throw new Error(`${what} needs a source video. Upload one first.`);
+  return url;
+}
+
+/** Requires the start frame for image-based workflows. */
+async function requireStartFrame(params: FluxGenerationParams): Promise<string> {
+  const url = await ensureHostedUrl(params.startFrameUrl);
+  if (!url) {
+    throw new Error('A start frame image is required for this mode. Upload or pick one first.');
+  }
+  return url;
+}
+
+/** Throws a clear error when a model is asked for a workflow it has no endpoint for. */
+function unsupportedMode(params: FluxGenerationParams): never {
+  const model = getModel(params.modelId);
+  throw new Error(`${model.label} doesn’t support this workflow. Pick a different mode.`);
+}
+
+async function buildKlingRequest(params: FluxGenerationParams): Promise<BuiltRequest> {
+  const model = getModel(params.modelId);
+  const mode = params.workflowMode;
+  const prompt = params.prompt.trim();
+  const resolution = resolveOutputResolution(params);
+  const duration = effectiveDuration(params.modelId, mode, params.duration);
+  const aspect =
+    params.aspectRatio === 'auto' || params.aspectRatio === '2:1' ? undefined : params.aspectRatio;
+
+  switch (mode) {
+    case 'text_to_video':
+      return {
+        endpointId: model.endpoints.textToVideo,
+        input: { prompt, duration, resolution, aspect_ratio: aspect ?? '16:9' },
+      };
+
+    case 'image_to_video':
+    case 'first_last_frame': {
+      // Aspect ratio is taken from the start image; the endpoint has no field for it.
+      const input: Record<string, unknown> = {
+        prompt,
+        duration,
+        resolution,
+        start_image_url: await requireStartFrame(params),
+      };
+      if (mode === 'first_last_frame') {
+        const end = await ensureHostedUrl(params.endFrameUrl);
+        if (!end) throw new Error('Keyframe Pair needs both a start frame and an end frame.');
+        input.end_image_url = end;
+      }
+      return { endpointId: model.endpoints.imageToVideo, input };
+    }
+
+    case 'reference_to_video': {
+      const images = await ensureHostedUrls(params.referenceImages || []);
+      const videos = await ensureHostedUrls(params.referenceVideos || []);
+      if (images.length === 0 && videos.length === 0) {
+        throw new Error('Reference to Video needs at least one reference image or video. Add one first.');
+      }
+      const input: Record<string, unknown> = { prompt, duration, resolution };
+      if (aspect) input.aspect_ratio = aspect;
+      if (images.length) input.image_urls = images.slice(0, model.maxReferenceImages);
+      if (videos.length) input.video_urls = videos.slice(0, model.maxReferenceVideos);
+      return { endpointId: model.endpoints.referenceToVideo as string, input };
+    }
+
+    case 'video_edit':
+      // Output length follows the source clip, so no duration is sent.
+      return {
+        endpointId: model.endpoints.videoEdit as string,
+        input: {
+          prompt,
+          resolution,
+          video_url: await requireSourceVideo(params, 'Edit'),
+        },
+      };
+
+    default:
+      return unsupportedMode(params);
+  }
+}
+
+async function buildWanRequest(params: FluxGenerationParams): Promise<BuiltRequest> {
+  const model = getModel(params.modelId);
+  const mode = params.workflowMode;
+  const base: Record<string, unknown> = {
+    prompt: params.prompt.trim(),
+    resolution: resolveOutputResolution(params),
+    duration: effectiveDuration(params.modelId, mode, params.duration),
+    // Wan calls "let the model pick" adaptive, and takes no 21:9 or 2:1.
+    aspect_ratio:
+      params.aspectRatio === 'auto' ||
+      params.aspectRatio === '21:9' ||
+      params.aspectRatio === '2:1'
+        ? 'adaptive'
+        : params.aspectRatio,
+    audio: params.nativeAudio,
+    seed: params.seed,
+  };
+
+  switch (mode) {
+    case 'text_to_video':
+      return { endpointId: model.endpoints.textToVideo, input: base };
+
+    case 'image_to_video':
+    case 'first_last_frame': {
+      const input: Record<string, unknown> = {
+        ...base,
+        start_image_url: await requireStartFrame(params),
+      };
+      if (mode === 'first_last_frame') {
+        const end = await ensureHostedUrl(params.endFrameUrl);
+        if (!end) throw new Error('Keyframe Pair needs both a start frame and an end frame.');
+        input.end_image_url = end;
+      }
+      return { endpointId: model.endpoints.imageToVideo, input };
+    }
+
+    case 'reference_to_video': {
+      const images = await ensureHostedUrls(params.referenceImages || []);
+      const videos = await ensureHostedUrls(params.referenceVideos || []);
+      if (images.length === 0 && videos.length === 0) {
+        throw new Error('Reference to Video needs at least one reference image or video. Add one first.');
+      }
+      const input: Record<string, unknown> = { ...base };
+      if (images.length) input.reference_image_urls = images.slice(0, model.maxReferenceImages);
+      if (videos.length) input.reference_video_urls = videos.slice(0, model.maxReferenceVideos);
+      return { endpointId: model.endpoints.referenceToVideo as string, input };
+    }
+
+    default:
+      return unsupportedMode(params);
+  }
+}
+
+async function buildLumaRequest(params: FluxGenerationParams): Promise<BuiltRequest> {
+  const model = getModel(params.modelId);
+  const mode = params.workflowMode;
+  const prompt = params.prompt.trim();
+  const resolution = resolveOutputResolution(params);
+  const duration = `${effectiveDuration(params.modelId, mode, params.duration)}s`;
+  const aspect =
+    params.aspectRatio === 'auto' || params.aspectRatio === '2:1' ? '16:9' : params.aspectRatio;
+
+  switch (mode) {
+    case 'text_to_video':
+      return {
+        endpointId: model.endpoints.textToVideo,
+        input: { prompt, resolution, duration, aspect_ratio: aspect },
+      };
+
+    case 'image_to_video':
+    case 'first_last_frame': {
+      const input: Record<string, unknown> = {
+        prompt,
+        resolution,
+        duration,
+        aspect_ratio: aspect,
+        image_url: await requireStartFrame(params),
+      };
+      if (mode === 'first_last_frame') {
+        const end = await ensureHostedUrl(params.endFrameUrl);
+        if (!end) throw new Error('Keyframe Pair needs both a start frame and an end frame.');
+        input.end_image_url = end;
+      }
+      return { endpointId: model.endpoints.imageToVideo, input };
+    }
+
+    case 'video_edit':
+      // Restyle: keeps the source's look and motion, re-rendered at 5s or 10s.
+      return {
+        endpointId: model.endpoints.videoEdit as string,
+        input: {
+          prompt,
+          resolution,
+          duration,
+          video_url: await requireSourceVideo(params, 'Restyle'),
+        },
+      };
+
+    case 'video_reframe':
+      // Reframe keeps the source footage frame for frame and outpaints the rest
+      // of the new aspect ratio, so it takes no duration.
+      return {
+        endpointId: model.endpoints.reframe as string,
+        input: {
+          prompt,
+          resolution,
+          aspect_ratio: aspect,
+          video_url: await requireSourceVideo(params, 'Reframe'),
+        },
+      };
+
+    default:
+      return unsupportedMode(params);
+  }
+}
+
+async function buildVeoRequest(params: FluxGenerationParams): Promise<BuiltRequest> {
+  const model = getModel(params.modelId);
+  const mode = params.workflowMode;
+  const base: Record<string, unknown> = {
+    prompt: params.prompt.trim(),
+    // fal spells 4K as "4k".
+    resolution: ((): string => {
+      const r = resolveOutputResolution(params);
+      return r === '2160p' ? '4k' : r;
+    })(),
+    duration: `${effectiveDuration(params.modelId, mode, params.duration)}s`,
+    generate_audio: params.nativeAudio,
+    seed: params.seed,
+  };
+  // 'auto' is valid on every Veo endpoint except text-to-video and reference-to-video.
+  const aspect = params.aspectRatio === '9:16' ? '9:16' : params.aspectRatio === '16:9' ? '16:9' : 'auto';
+  const aspectNoAuto = aspect === 'auto' ? '16:9' : aspect;
+
+  switch (mode) {
+    case 'text_to_video':
+      return {
+        endpointId: model.endpoints.textToVideo,
+        input: { ...base, aspect_ratio: aspectNoAuto },
+      };
+
+    case 'image_to_video':
+      return {
+        endpointId: model.endpoints.imageToVideo,
+        input: { ...base, aspect_ratio: aspect, image_url: await requireStartFrame(params) },
+      };
+
+    case 'first_last_frame': {
+      const [first, last] = await Promise.all([
+        ensureHostedUrl(params.startFrameUrl),
+        ensureHostedUrl(params.endFrameUrl),
+      ]);
+      if (!first || !last) {
+        throw new Error('Keyframe Pair needs both a start frame and an end frame.');
+      }
+      return {
+        endpointId: model.endpoints.firstLastToVideo as string,
+        input: { ...base, aspect_ratio: aspect, first_frame_url: first, last_frame_url: last },
+      };
+    }
+
+    case 'reference_to_video': {
+      const images = await ensureHostedUrls(params.referenceImages || []);
+      if (images.length === 0) {
+        throw new Error('Reference to Video needs at least one reference image. Add one first.');
+      }
+      // This endpoint takes no seed.
+      const { seed: _seed, ...rest } = base;
+      return {
+        endpointId: model.endpoints.referenceToVideo as string,
+        input: {
+          ...rest,
+          aspect_ratio: aspectNoAuto,
+          image_urls: images.slice(0, model.maxReferenceImages),
+        },
+      };
+    }
+
+    case 'video_extend':
+      return {
+        endpointId: model.endpoints.extendVideo as string,
+        input: {
+          ...base,
+          resolution: '720p',
+          aspect_ratio: aspect,
+          video_url: await requireSourceVideo(params, 'Extend'),
+        },
+      };
+
+    default:
+      return unsupportedMode(params);
+  }
+}
+
+async function buildGeminiOmniRequest(params: FluxGenerationParams): Promise<BuiltRequest> {
+  const model = getModel(params.modelId);
+  const mode = params.workflowMode;
+  const prompt = params.prompt.trim();
+  // These endpoints take no resolution, audio or seed field.
+  const common = {
+    prompt,
+    duration: effectiveDuration(params.modelId, mode, params.duration),
+    aspect_ratio: params.aspectRatio === '9:16' ? '9:16' : '16:9',
+  };
+
+  switch (mode) {
+    case 'text_to_video':
+      return { endpointId: model.endpoints.textToVideo, input: common };
+
+    case 'image_to_video':
+      return {
+        endpointId: model.endpoints.imageToVideo,
+        input: { ...common, image_url: await requireStartFrame(params) },
+      };
+
+    case 'reference_to_video': {
+      const images = await ensureHostedUrls(params.referenceImages || []);
+      if (images.length === 0) {
+        throw new Error('Reference to Video needs at least one reference image. Add one first.');
+      }
+      return {
+        endpointId: model.endpoints.referenceToVideo as string,
+        input: { ...common, image_urls: images.slice(0, model.maxReferenceImages) },
+      };
+    }
+
+    case 'video_edit':
+      // The edit endpoint takes only the source video and the instruction.
+      return {
+        endpointId: model.endpoints.videoEdit as string,
+        input: { prompt, video_url: await requireSourceVideo(params, 'Edit') },
+      };
+
+    default:
+      return unsupportedMode(params);
+  }
+}
+
 /** Picks the right request builder for the selected model family. */
-async function buildRequest(
-  params: FluxGenerationParams
-): Promise<{ endpointId: string; input: Record<string, unknown> }> {
-  return getModel(params.modelId).family === 'flux-3'
-    ? buildFlux3Request(params)
-    : buildSeedanceRequest(params);
+export async function buildRequest(params: FluxGenerationParams): Promise<BuiltRequest> {
+  switch (getModel(params.modelId).family) {
+    case 'flux-3':
+      return buildFlux3Request(params);
+    case 'kling':
+      return buildKlingRequest(params);
+    case 'wan':
+      return buildWanRequest(params);
+    case 'luma':
+      return buildLumaRequest(params);
+    case 'veo':
+      return buildVeoRequest(params);
+    case 'gemini-omni':
+      return buildGeminiOmniRequest(params);
+    default:
+      return buildSeedanceRequest(params);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -484,7 +829,7 @@ export async function generateVideo(
         input,
         modelId: params.modelId,
         resolution: resolveOutputResolution(params),
-        duration: clampDurationForModel(params.modelId, params.duration),
+        duration: effectiveDuration(params.modelId, params.workflowMode, params.duration),
         aspectRatio: params.aspectRatio,
       },
       abortSignal

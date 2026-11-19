@@ -65,7 +65,8 @@ export async function runGeneration(
   const { tokens, costUsd } = await computeVideoCost(
     payload.endpointId,
     payload.resolution,
-    payload.duration
+    payload.duration,
+    payload.input
   );
 
   return {

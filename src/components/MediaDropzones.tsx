@@ -732,14 +732,20 @@ Generates scene geometry, lighting, and motion vectors directly from your text p
       )}
 
       {/* 4. Source Clip Dropzone (Video Extend / Edit) */}
-      {workflowMode === 'video_extend' && (
+      {(workflowMode === 'video_extend' ||
+        workflowMode === 'video_edit' ||
+        workflowMode === 'video_reframe') && (
         <div className="space-y-1.5">
           <div className="flex items-center justify-between text-xs">
             <span className="font-semibold text-zinc-200 flex items-center gap-1.5">
               <Film className="w-3.5 h-3.5 text-purple-400" />
               Source Video Clip{' '}
               <span className="text-zinc-500 text-[10px] font-normal">
-                (MP4 to extend / restyle)
+                {workflowMode === 'video_reframe'
+                  ? '(MP4 to reframe)'
+                  : workflowMode === 'video_edit'
+                  ? '(MP4 to edit / restyle)'
+                  : '(MP4 to extend / restyle)'}
               </span>
             </span>
             <div className="flex items-center gap-1.5">

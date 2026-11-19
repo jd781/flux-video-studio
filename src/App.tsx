@@ -13,6 +13,7 @@ import {
   GenerationError,
 } from './lib/falClient';
 import { flux3EnhanceCost } from './utils/flux3';
+import { getModel } from './utils/modelCatalog';
 import { captureVideoThumbnail } from './utils/videoThumbnail';
 import { validateGeneration } from './utils/validateGeneration';
 import { GenerationNotice, GenerationNoticeData } from './components/GenerationNotice';
@@ -387,7 +388,18 @@ export default function App({ currentUser }: AppProps) {
     params.modelId,
     params.duration,
     params.qualityTier,
-    { workflowMode: params.workflowMode, resolution: params.resolution }
+    {
+      workflowMode: params.workflowMode,
+      resolution: params.resolution,
+      nativeAudio: params.nativeAudio,
+      // Only the clips this workflow actually sends count (stale slots from
+      // another mode are ignored).
+      hasVideoInput:
+        (['video_extend', 'video_edit', 'video_reframe'].includes(params.workflowMode) &&
+          Boolean(params.sourceVideoUrl)) ||
+        (params.workflowMode === 'reference_to_video' &&
+          (params.referenceVideos?.length ?? 0) > 0),
+    }
   );
 
   // Captures a real first-frame thumbnail from a video and patches the take's
@@ -467,7 +479,7 @@ export default function App({ currentUser }: AppProps) {
       currentStep: 0,
       totalSteps,
       phase: 'queued',
-      statusMessage: 'Uploading media & submitting to fal.ai Seedance...',
+      statusMessage: 'Uploading media & submitting to fal.ai...',
       etaSeconds: Math.max(10, params.duration * 3),
     });
 
@@ -512,7 +524,11 @@ export default function App({ currentUser }: AppProps) {
         resolution: result.resolution,
         prompt: params.prompt,
         params: { ...params, seed: result.seed },
-        hasAudio: params.nativeAudio,
+        // Some models always (or never) produce audio regardless of the toggle.
+        hasAudio:
+          getModel(params.modelId).audio === 'toggle'
+            ? params.nativeAudio
+            : getModel(params.modelId).audio === 'always',
         costEstimate: currentCost.dollars,
         // FLUX 3 drafts keep their cache so they can be enhanced later.
         draftCacheUrl: result.draftCacheUrl ?? undefined,
@@ -535,7 +551,7 @@ export default function App({ currentUser }: AppProps) {
         etaSeconds: 0,
       });
 
-      showToast('Video generated successfully via fal.ai Seedance!', 'success');
+      showToast(`Video generated successfully with ${getModel(params.modelId).label}!`, 'success');
     } catch (err) {
       const aborted =
         abortController.signal.aborted ||

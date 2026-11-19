@@ -35,15 +35,30 @@ interface FalErrorItem {
 // Guards that run BEFORE anything is sent to fal (so nothing is wasted).
 // ---------------------------------------------------------------------------
 
-/** Only Seedance endpoints may be called through /api/generate. */
+/** Only the video models listed here may be called through /api/generate. */
 const ALLOWED_GENERATION_PREFIXES = [
   'bytedance/seedance-2.0/',
   'bytedance/seedance-2.5/',
   'blackforestlabs/flux-3/',
+  'kling/v4/',
+  'alibaba/wan-3.0-prime/',
+  'luma/agent/ray/v3.2/',
 ];
 
+/**
+ * Models whose text-to-video endpoint is the bare model path (no suffix), so
+ * the endpoint itself and everything beneath it is allowed. Matching on the
+ * path boundary keeps unrelated models (e.g. other "veo3.1-*" variants) out.
+ */
+const ALLOWED_GENERATION_ROOTS = ['fal-ai/veo3.1', 'google/gemini-omni-flash'];
+
 export function isAllowedGenerationEndpoint(endpointId: string): boolean {
-  return ALLOWED_GENERATION_PREFIXES.some((p) => endpointId.startsWith(p));
+  return (
+    ALLOWED_GENERATION_PREFIXES.some((p) => endpointId.startsWith(p)) ||
+    ALLOWED_GENERATION_ROOTS.some(
+      (r) => endpointId === r || endpointId.startsWith(`${r}/`)
+    )
+  );
 }
 
 const nonEmptyList = (v: unknown): boolean => Array.isArray(v) && v.length > 0;
@@ -81,7 +96,15 @@ export function checkGeneratePayload(
   }
 
   if (tail.endsWith('/reference-to-video')) {
-    if (!nonEmptyList(input.image_urls) && !nonEmptyList(input.video_urls)) {
+    // Field names differ per model: Seedance/Kling/Veo/Gemini use image_urls and
+    // video_urls; Wan uses reference_image_urls and reference_video_urls.
+    if (
+      !nonEmptyList(input.image_urls) &&
+      !nonEmptyList(input.video_urls) &&
+      !nonEmptyList(input.reference_image_urls) &&
+      !nonEmptyList(input.reference_video_urls) &&
+      !nonEmptyList(input.elements)
+    ) {
       return reject(
         'missing_reference',
         'No reference image or video was included.',
@@ -90,7 +113,13 @@ export function checkGeneratePayload(
     }
   }
 
-  if (tail.endsWith('/image-to-video') && !nonEmptyString(input.image_url)) {
+  // Start image field: image_url (Seedance, Veo, Luma, Gemini) or
+  // start_image_url (Kling, Wan).
+  if (
+    tail.endsWith('/image-to-video') &&
+    !nonEmptyString(input.image_url) &&
+    !nonEmptyString(input.start_image_url)
+  ) {
     return reject(
       'missing_start_image',
       'No start frame image was included.',
@@ -99,7 +128,10 @@ export function checkGeneratePayload(
   }
 
   if (tail.endsWith('/first-last-frame-to-video')) {
-    if (!nonEmptyString(input.start_image_url) || !nonEmptyString(input.end_image_url)) {
+    // FLUX 3 uses start_image_url/end_image_url; Veo uses first_frame_url/last_frame_url.
+    const hasFlux = nonEmptyString(input.start_image_url) && nonEmptyString(input.end_image_url);
+    const hasVeo = nonEmptyString(input.first_frame_url) && nonEmptyString(input.last_frame_url);
+    if (!hasFlux && !hasVeo) {
       return reject(
         'missing_frames',
         'Both a start frame and an end frame are required.',
@@ -146,17 +178,42 @@ export function checkGeneratePayload(
     }
   }
 
-  if (tail.endsWith('/extend-video') && !nonEmptyString(input.video_url)) {
+  // Edit / restyle / reframe / extend all operate on a source video.
+  const isEditOrReframe =
+    tail.endsWith('/video-to-video') ||
+    tail.endsWith('/video-to-video/edit') ||
+    tail.endsWith('/reframe') ||
+    tail === 'google/gemini-omni-flash/edit';
+  if (
+    (tail.endsWith('/extend-video') || isEditOrReframe) &&
+    !nonEmptyString(input.video_url)
+  ) {
     return reject(
       'missing_source_video',
       'No source video was included.',
-      'Upload the clip you want to extend, then generate again.'
+      'Upload the clip you want to extend or edit, then generate again.'
     );
   }
 
-  // Text prompts are required on every text-to-video endpoint and on all FLUX 3
-  // generation endpoints.
-  if ((tail.endsWith('/text-to-video') || isFlux) && !nonEmptyString(input.prompt)) {
+  // Text prompts are required on text-to-video endpoints, on all FLUX 3
+  // generation endpoints, and on every endpoint of the models whose schema
+  // makes `prompt` mandatory (Veo, Luma, Gemini Omni, edit/reframe). Kling and
+  // Wan image/reference endpoints and the Seedance image/reference endpoints
+  // treat it as optional.
+  const promptOptional =
+    /^(kling\/v4|alibaba\/wan-3\.0-prime)\/(image|reference)-to-video$/.test(tail) ||
+    /^bytedance\/seedance-/.test(tail);
+  const bareTextEndpoint =
+    tail === 'fal-ai/veo3.1' ||
+    tail === 'fal-ai/veo3.1/fast' ||
+    tail === 'google/gemini-omni-flash';
+  const promptRequired =
+    tail.endsWith('/text-to-video') ||
+    isFlux ||
+    bareTextEndpoint ||
+    isEditOrReframe ||
+    (!promptOptional && /^(fal-ai\/veo3\.1|google\/gemini-omni-flash|luma\/)/.test(tail));
+  if (promptRequired && !nonEmptyString(input.prompt)) {
     return reject(
       'missing_prompt',
       'The prompt is empty.',

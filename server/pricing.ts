@@ -19,6 +19,7 @@ import {
   flux3EnhanceCost,
   flux3FromEndpoint,
 } from '../src/utils/flux3';
+import { perSecondCost, perSecondFromEndpoint } from '../src/utils/perSecondPricing';
 
 export type { ModelResolution };
 
@@ -97,8 +98,30 @@ export interface VideoCost {
 export async function computeVideoCost(
   endpointId: string,
   resolution: ModelResolution,
-  durationSeconds: number
+  durationSeconds: number,
+  input: Record<string, unknown> = {}
 ): Promise<VideoCost> {
+  // Kling, Wan, Luma, Veo and Gemini Omni bill per second of output at a rate
+  // that depends on resolution (see utils/perSecondPricing.ts). They must not
+  // fall through to the Seedance token math below.
+  const perSecond = perSecondFromEndpoint(endpointId);
+  if (perSecond) {
+    const hasVideoInput =
+      typeof input.video_url === 'string' ||
+      (Array.isArray(input.video_urls) && input.video_urls.length > 0);
+    return {
+      tokens: 0,
+      costUsd: perSecondCost({
+        modelId: perSecond.modelId,
+        kind: perSecond.kind,
+        resolution,
+        durationSeconds,
+        audio: input.generate_audio !== false,
+        hasVideoInput,
+      }),
+    };
+  }
+
   // FLUX 3 is billed per second of output (not per token), at a published rate
   // that depends on the endpoint and resolution. Drafts are a flat cheap rate.
   const flux = flux3FromEndpoint(endpointId);

@@ -1,5 +1,5 @@
 import { FluxGenerationParams } from '../types/flux';
-import { getModel } from './modelCatalog';
+import { getAvailableAspectRatios, getModel } from './modelCatalog';
 import { keyframeFrameIndex } from './flux3';
 
 /**
@@ -94,7 +94,7 @@ export function validateGeneration(params: FluxGenerationParams): PreflightResul
   }
 
   // Aspect ratio must be one the model accepts (e.g. after switching models).
-  if (!model.aspectRatios.includes(params.aspectRatio)) {
+  if (!getAvailableAspectRatios(params.modelId, mode).includes(params.aspectRatio)) {
     errors.push({
       id: 'aspect',
       message: `${model.label} doesn’t support the ${params.aspectRatio} aspect ratio.`,
@@ -232,11 +232,19 @@ export function validateGeneration(params: FluxGenerationParams): PreflightResul
       break;
 
     case 'video_extend':
+    case 'video_edit':
+    case 'video_reframe':
       if (!params.sourceVideoUrl) {
+        const label =
+          mode === 'video_edit'
+            ? 'Edit'
+            : mode === 'video_reframe'
+            ? 'Reframe'
+            : 'Extend & Edit';
         errors.push({
           id: 'source',
-          message: 'Extend & Edit needs a source video.',
-          fix: 'Upload the clip you want to extend or edit.',
+          message: `${label} needs a source video.`,
+          fix: 'Upload the clip you want to extend, edit or reframe.',
         });
       }
       if (params.sourceVideoUrl) {

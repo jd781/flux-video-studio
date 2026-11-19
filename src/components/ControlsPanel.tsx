@@ -18,6 +18,8 @@ import {
   Images,
   RectangleHorizontal,
   RectangleVertical,
+  Pencil,
+  Crop,
 } from 'lucide-react';
 import {
   AspectRatio,
@@ -34,12 +36,18 @@ import { generateRandomSeed } from '../utils/fluxVideoUtils';
 import {
   MODEL_FAMILIES,
   clampDurationForModel,
+  getAvailableAspectRatios,
   getAvailableResolutions,
   getFamily,
   getModel,
   resolveOutputResolution,
 } from '../utils/modelCatalog';
 import { flux3KindForMode, flux3RatePerSecond } from '../utils/flux3';
+import {
+  isPerSecondModel,
+  perSecondRate,
+  pricingKindForMode,
+} from '../utils/perSecondPricing';
 
 const ASPECT_META: Record<AspectRatio, { label: string; icon: React.ElementType }> = {
   '16:9': { label: '16:9', icon: Maximize2 },
@@ -54,6 +62,7 @@ const ASPECT_META: Record<AspectRatio, { label: string; icon: React.ElementType 
 
 const RESOLUTION_LABEL: Record<ModelResolution, string> = {
   '480p': '480p',
+  '540p': '540p',
   '720p': '720p',
   '1080p': '1080p',
   '1440p': '2K',
@@ -77,6 +86,8 @@ const WORKFLOW_TABS: {
   { id: 'keyframes_timeline', label: 'Timeline', icon: Clock },
   { id: 'reference_to_video', label: 'Reference', icon: Images },
   { id: 'video_extend', label: 'Extend & Edit', icon: Film },
+  { id: 'video_edit', label: 'Edit', icon: Pencil },
+  { id: 'video_reframe', label: 'Reframe', icon: Crop },
 ];
 
 const REFERENCE_TASKS: { id: ReferenceTask; label: string; hint: string }[] = [
@@ -124,7 +135,23 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
   const ratePerSecond =
     model.family === 'flux-3' && fluxKind
       ? flux3RatePerSecond(fluxKind, effectiveResolution, params.qualityTier === 'draft')
+      : isPerSecondModel(params.modelId)
+      ? perSecondRate({
+          modelId: params.modelId,
+          kind: pricingKindForMode(params.workflowMode),
+          resolution: effectiveResolution,
+          durationSeconds: params.duration,
+          audio: params.nativeAudio,
+          hasVideoInput:
+            (['video_extend', 'video_edit', 'video_reframe'].includes(params.workflowMode) &&
+              Boolean(params.sourceVideoUrl)) ||
+            (params.workflowMode === 'reference_to_video' &&
+              (params.referenceVideos?.length ?? 0) > 0),
+        })
       : null;
+  const availableAspectRatios = getAvailableAspectRatios(params.modelId, params.workflowMode);
+  const fixedDuration = model.fixedDurationByMode?.[params.workflowMode];
+  const durationFromSource = model.durationFromSource?.includes(params.workflowMode) ?? false;
 
   const handleModelChange = (modelId: ModelId) => {
     const next = getModel(modelId);
@@ -145,11 +172,12 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
       ? params.workflowMode
       : next.workflowModes[0];
 
-    const aspectRatio = next.aspectRatios.includes(params.aspectRatio)
+    const nextRatios = getAvailableAspectRatios(modelId, workflowMode);
+    const aspectRatio = nextRatios.includes(params.aspectRatio)
       ? params.aspectRatio
-      : next.aspectRatios.includes('16:9')
+      : nextRatios.includes('16:9')
       ? '16:9'
-      : next.aspectRatios[0];
+      : nextRatios[0];
 
     // A chosen resolution only carries over if the new model/mode offers it.
     const keepResolution =
@@ -181,6 +209,12 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
       !getAvailableResolutions(params.modelId, mode).includes(params.resolution)
     ) {
       patch.resolution = undefined;
+    }
+    // Some workflows accept a different set of aspect ratios (e.g. Veo
+    // text-to-video has no "auto"); keep the choice if still valid, else snap.
+    const ratios = getAvailableAspectRatios(params.modelId, mode);
+    if (!ratios.includes(params.aspectRatio)) {
+      patch.aspectRatio = ratios.includes('16:9') ? '16:9' : ratios[0];
     }
     onChangeParams(patch);
   };
@@ -322,9 +356,10 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
             Workflow Mode
           </label>
           <div
-            className={`grid gap-1 p-1 bg-neutral-900/80 rounded-xl border border-white/[0.08] ${
-              visibleTabs.length >= 6 ? 'grid-cols-6' : 'grid-cols-5'
-            }`}
+            className="grid gap-1 p-1 bg-neutral-900/80 rounded-xl border border-white/[0.08]"
+            style={{
+              gridTemplateColumns: `repeat(${Math.min(visibleTabs.length, 6)}, minmax(0, 1fr))`,
+            }}
           >
             {visibleTabs.map((tab) => {
               const Icon = tab.icon;
@@ -462,7 +497,26 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
             </div>
           </div>
 
+          {/* Models whose API has no audio switch: say what they do instead */}
+          {model.audio !== 'toggle' && (
+            <div className="bg-neutral-900/60 border border-white/[0.08] rounded-xl p-3 flex items-center gap-2.5">
+              <div className="p-1.5 rounded-lg bg-neutral-800 text-neutral-400">
+                {model.audio === 'always' ? (
+                  <Volume2 className="w-3.5 h-3.5" />
+                ) : (
+                  <VolumeX className="w-3.5 h-3.5" />
+                )}
+              </div>
+              <div className="text-[11px] text-neutral-400">
+                {model.audio === 'always'
+                  ? `${model.label} generates audio automatically. It can’t be turned off.`
+                  : `${model.label} doesn’t generate audio.`}
+              </div>
+            </div>
+          )}
+
           {/* Sleek Apple Toggle: Native Audio */}
+          {model.audio === 'toggle' && (
           <div className="bg-neutral-900/60 border border-white/[0.08] rounded-xl p-3 flex items-center justify-between">
             <div className="flex items-center gap-2.5">
               <div
@@ -508,6 +562,7 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
               />
             </button>
           </div>
+          )}
         </div>
 
         {/* Format & Presets */}
@@ -525,10 +580,10 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
             <div
               className="grid gap-1.5 p-1 bg-neutral-900/80 rounded-xl border border-white/[0.08]"
               style={{
-                gridTemplateColumns: `repeat(${Math.min(model.aspectRatios.length, 4)}, minmax(0, 1fr))`,
+                gridTemplateColumns: `repeat(${Math.min(availableAspectRatios.length, 4)}, minmax(0, 1fr))`,
               }}
             >
-              {model.aspectRatios
+              {availableAspectRatios
                 .map((id) => ({ id, ...ASPECT_META[id] }))
                 .map((item) => {
                 const Icon = item.icon;
@@ -556,10 +611,25 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
           {/* Duration Chips */}
           <div className="space-y-1.5">
             <div className="flex items-center justify-between">
-              <span className="text-xs text-neutral-300">Duration</span>
-              <span className="text-[10px] text-neutral-500 font-mono">{params.duration} seconds</span>
+              <span className="text-xs text-neutral-300">
+                {durationFromSource ? 'Source length (cost estimate)' : 'Duration'}
+              </span>
+              <span className="text-[10px] text-neutral-500 font-mono">
+                {fixedDuration ?? params.duration} seconds
+              </span>
             </div>
+            {fixedDuration !== undefined && (
+              <p className="text-[10px] text-neutral-500 leading-relaxed">
+                {model.label} renders a fixed {fixedDuration}s for this workflow.
+              </p>
+            )}
+            {durationFromSource && (
+              <p className="text-[10px] text-neutral-500 leading-relaxed">
+                The output follows your source clip. This value only sets the cost estimate.
+              </p>
+            )}
             <div
+              hidden={fixedDuration !== undefined}
               className="grid gap-1.5 p-1 bg-neutral-900/80 rounded-xl border border-white/[0.08]"
               style={{
                 gridTemplateColumns: `repeat(${model.durations.length}, minmax(0, 1fr))`,
@@ -585,7 +655,7 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
               })}
             </div>
             {/* Any whole second in the model's range (FLUX 3: 5-20s) */}
-            {model.durationRange && (
+            {model.durationRange && fixedDuration === undefined && (
               <input
                 type="range"
                 min={model.durationRange.min}
@@ -702,7 +772,7 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
                 </div>
                 {availableResolutions.length < model.resolutions.length && (
                   <p className="text-[10px] text-neutral-500 leading-relaxed">
-                    2K and 4K are available for Text to Video and Image to Video.
+                    Some resolutions aren’t offered for this workflow.
                   </p>
                 )}
               </div>
