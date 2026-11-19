@@ -31,8 +31,13 @@ Your public URL will be `https://<app-name>.fly.dev`.
 Must match `[mounts].source` in `fly.toml` (`flux_data`) and the app's region:
 
 ```bash
-fly volumes create flux_data --region iad --size 1
+fly volumes create flux_data --region iad --size 20
 ```
+
+The volume holds the SQLite database (`app.db`: users, usage, Studio sessions and
+Production Pipeline projects) **and** the pipeline's media files under
+`/data/assets/<projectId>/`. Images, audio, video and PDFs add up, so start at
+20 GB. A volume can be grown later (`fly volumes extend`) but not shrunk.
 
 ## 3. Set secrets
 
@@ -44,8 +49,13 @@ fly secrets set \
   GOOGLE_CLIENT_ID="your-google-client-id" \
   GOOGLE_CLIENT_SECRET="your-google-client-secret" \
   SESSION_SECRET="$(node -e "console.log(require('crypto').randomBytes(48).toString('hex'))")" \
+  GEMINI_API_KEY="your-gemini-key" \
   APP_URL="https://<app-name>.fly.dev"
 ```
+
+`GEMINI_API_KEY` powers the Production Pipeline's text and vision steps and the
+VoxCraft voiceover. Use the company-owned key, and keep it (and `FAL_KEY`) in Fly
+secrets only, never in Git or browser code.
 
 `APP_URL` is critical: the server builds the Google OAuth callback from it
 (`<APP_URL>/auth/google/callback`).
@@ -63,8 +73,20 @@ https://<app-name>.fly.dev/auth/google/callback
 ## 5. Deploy
 
 ```bash
-fly deploy
+fly deploy \
+  --build-arg VITE_FIREBASE_API_KEY="..." \
+  --build-arg VITE_FIREBASE_AUTH_DOMAIN="<project>.firebaseapp.com" \
+  --build-arg VITE_FIREBASE_PROJECT_ID="<project>" \
+  --build-arg VITE_FIREBASE_APP_ID="..."
 ```
+
+The `VITE_FIREBASE_*` build args configure the pipeline's **Connect Google Drive**
+button. Use the Firebase web config of the **company-owned** Firebase / Google
+Cloud project: Google sign-in enabled, this app's hostname under *Authorized
+domains*, the Drive API enabled, and the Drive scopes approved for the Workspace.
+They are web identifiers rather than secrets, but they are baked into the build,
+so changing them means redeploying. Leave them out and the app still works, with
+Drive disabled.
 
 Fly builds the Docker image remotely, runs `npm run build`, and starts the
 server with `npm run start` on internal port 8080.
@@ -92,7 +114,15 @@ across deploys.
   returns 200 without auth, so the machine is considered healthy.
 - **Cookies**: secure, httpOnly session cookies require HTTPS. Fly terminates
   TLS at the edge and the server sets `trust proxy` in production, so this works.
-- **Backups**: the SQLite DB is a single file on the volume. For real backups,
-  enable Fly volume snapshots or periodically copy `/data/app.db` off-box.
+- **Backups**: data lives in two places on the volume, `/data/app.db` and
+  `/data/assets/`. Turn on Fly volume snapshots (they capture both), and also copy
+  a consistent database copy plus the assets folder off Fly on a schedule, because
+  snapshots are same-provider and short-lived. Test a restore: import a project
+  backup (`.52launch-backup`) from the pipeline header, or restore a snapshot to a
+  new volume.
+- **Concurrent edits**: two people saving the same pipeline project is detected,
+  not merged. The second save is refused and the latest copy is shown.
+- **Project access**: pipeline projects are visible to every signed-in
+  `@52launch.com` user. Only the owner (or `jd@52launch.com`) can delete one.
 - **Secrets rotation**: changing `SESSION_SECRET` invalidates all active
   sessions (everyone must log in again).
