@@ -1,6 +1,13 @@
 import { Router } from 'express';
 import path from 'path';
 import { ADMIN_EMAIL } from './auth';
+import {
+  trackEnhanceUsage,
+  trackFalFailure,
+  trackImageUsage,
+  trackUpscaleUsage,
+  trackVideoUsage,
+} from './usage';
 import { Type } from '@google/genai';
 import { fal } from '@fal-ai/client';
 import {
@@ -1801,6 +1808,7 @@ ${shotSpecs.join('\n')}`;
       negativePrompt !== undefined ? negativePrompt : shot.negativePrompt || '';
 
     let chosenEndpoint = String(effectiveModelId);
+    let usageRecorded = false;
     try {
       fal.config({ credentials: falKey });
 
@@ -1835,6 +1843,17 @@ ${shotSpecs.join('\n')}`;
         built.input,
         effectiveNeg
       );
+      // fal has billed this render, so record it before any file or project work.
+      usageRecorded = true;
+      await trackVideoUsage(req, {
+        modelId: effectiveModelId,
+        endpointId: built.endpointId,
+        resolution: built.resolvedResolution,
+        duration: built.clampedDuration,
+        aspectRatio: aspectRatio || '16:9',
+        requestId: result.requestId,
+        input: built.input,
+      });
 
       const data = result.data as {
         video?: { url?: string };
@@ -1956,6 +1975,17 @@ ${shotSpecs.join('\n')}`;
       });
     } catch (err) {
       const failure = describeFalFailure(err);
+      if (!usageRecorded) {
+        trackFalFailure(req, {
+          kind: 'generate',
+          modelId: effectiveModelId,
+          endpoint: chosenEndpoint,
+          resolution: resolution ?? null,
+          duration: Number(duration) || null,
+          aspectRatio: aspectRatio || '16:9',
+          err,
+        });
+      }
       await saveProject({
         ...project,
         generationLog: [
@@ -1999,6 +2029,7 @@ ${shotSpecs.join('\n')}`;
       return res.status(400).json({ error: 'No FLUX 3 draft cache available for this clip.' });
     }
 
+    let usageRecorded = false;
     try {
       fal.config({ credentials: falKey });
       const result = await fal.subscribe(FLUX3_ENDPOINTS.enhance, {
@@ -2007,6 +2038,12 @@ ${shotSpecs.join('\n')}`;
           safety_tolerance: typeof safetyTolerance === 'number' ? safetyTolerance : 2,
         },
         logs: false,
+      });
+      usageRecorded = true;
+      trackEnhanceUsage(req, {
+        endpointId: FLUX3_ENDPOINTS.enhance,
+        durationSeconds: Number(shot.durationSec) || 5,
+        requestId: result.requestId,
       });
       const data = result.data as { video?: { url?: string } };
       const remoteUrl = data?.video?.url;
@@ -2050,6 +2087,16 @@ ${shotSpecs.join('\n')}`;
       res.json({ project: saved, videoUrl: savedVideo.url, resolution: '1080p' });
     } catch (err) {
       const failure = describeFalFailure(err);
+      if (!usageRecorded) {
+        // Failed requests aren't billed by fal; this keeps a record of the attempt.
+        trackFalFailure(req, {
+          kind: 'enhance',
+          modelId: 'flux-3',
+          endpoint: FLUX3_ENDPOINTS.enhance,
+          resolution: '1080p',
+          err,
+        });
+      }
       res.status(failure.status).json({ error: failure.message });
     }
   });
@@ -2094,6 +2141,8 @@ ${shotSpecs.join('\n')}`;
       return res.status(400).json({ error: 'No video source found to upscale.' });
     }
 
+    let usageRecorded = false;
+    let upscaleEndpoint = 'topaz/upscale/video';
     try {
       fal.config({ credentials: falKey });
 
@@ -2117,11 +2166,19 @@ ${shotSpecs.join('\n')}`;
         creativity,
       });
 
+      upscaleEndpoint = built.endpointId;
       const result = await fal.subscribe(built.endpointId, {
         input: built.input,
         logs: false,
       });
 
+      usageRecorded = true;
+      await trackUpscaleUsage(req, {
+        endpointId: built.endpointId,
+        durationSeconds: Number(shot?.durationSec) || 5,
+        scaleFactor: built.scaleFactor,
+        requestId: result.requestId,
+      });
       const data = result.data as { video?: { url?: string } };
       const remoteUrl = data?.video?.url;
       if (!remoteUrl) throw new Error('Topaz upscaler returned no video.');
@@ -2225,6 +2282,14 @@ ${shotSpecs.join('\n')}`;
       });
     } catch (err) {
       const failure = describeFalFailure(err);
+      if (!usageRecorded) {
+        trackFalFailure(req, {
+          kind: 'upscale',
+          modelId: null,
+          endpoint: upscaleEndpoint,
+          err,
+        });
+      }
       res.status(failure.status).json({ error: failure.message });
     }
   });
@@ -2274,6 +2339,7 @@ ${shotSpecs.join('\n')}`;
                   ? 'gemini-omni-flash'
                   : 'seedance-2.5';
     let chosenEndpoint: string = modelId;
+    let usageRecorded = false;
 
     try {
       fal.config({ credentials: falKey });
@@ -2299,6 +2365,16 @@ ${shotSpecs.join('\n')}`;
         built.input,
         shot.negativePrompt
       );
+      usageRecorded = true;
+      await trackVideoUsage(req, {
+        modelId,
+        endpointId: built.endpointId,
+        resolution: built.resolvedResolution,
+        duration: built.clampedDuration,
+        aspectRatio: '16:9',
+        requestId: result.requestId,
+        input: built.input,
+      });
 
       const data = result.data as {
         video?: { url?: string };
@@ -2368,6 +2444,15 @@ ${shotSpecs.join('\n')}`;
       res.json({ project: saved });
     } catch (err) {
       const failure = describeFalFailure(err);
+      if (!usageRecorded) {
+        trackFalFailure(req, {
+          kind: 'generate',
+          modelId,
+          endpoint: chosenEndpoint,
+          aspectRatio: '16:9',
+          err,
+        });
+      }
       await saveProject({
         ...project,
         generationLog: [
@@ -4604,6 +4689,11 @@ Style Notes: ${paletteNote}. ${styleNote}`.trim();
         resolution: activeRes,
         referenceImageUrls,
       });
+      await trackImageUsage(req, {
+        endpointId: generated.endpointUsed,
+        resolution: activeRes,
+        aspectRatio: sheetAspect,
+      });
 
       const savedImg = await saveBinaryAssetFromUrl(
         project.id,
@@ -4817,6 +4907,11 @@ Output strictly a single full-bleed frame with zero borders, no split grid panel
         aspectRatio: studio.aspectRatio || '16:9',
         resolution: studio.resolution || '1K',
         referenceImageUrls,
+      });
+      await trackImageUsage(req, {
+        endpointId: generated.endpointUsed,
+        resolution: studio.resolution || '1K',
+        aspectRatio: studio.aspectRatio || '16:9',
       });
 
       const savedFrame = await saveBinaryAssetFromUrl(
