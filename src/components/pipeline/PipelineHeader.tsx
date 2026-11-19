@@ -11,6 +11,8 @@ import {
   LayoutGrid,
   Rocket,
   Cpu,
+  Clapperboard,
+  LogOut,
 } from 'lucide-react';
 import {
   PipelineProject,
@@ -18,6 +20,7 @@ import {
   ProjectSummary,
 } from '../../types/pipeline';
 import type { LlmRoutingMode } from '../../utils/googleDriveSync';
+import { logout, type AuthUser } from '../../lib/auth';
 
 interface PipelineHeaderProps {
   projects: ProjectSummary[];
@@ -40,6 +43,9 @@ interface PipelineHeaderProps {
   falConfigured?: boolean;
   geminiConfigured?: boolean;
   onChangeLlmMode?: (mode: LlmRoutingMode) => void;
+  currentUser?: AuthUser;
+  /** Switch back to the Video Studio. */
+  onSwitchToStudio?: () => void;
 }
 
 const STEPS: Array<{
@@ -79,6 +85,8 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
   falConfigured = false,
   geminiConfigured = false,
   onChangeLlmMode,
+  currentUser,
+  onSwitchToStudio,
 }) => {
   const importInputRef = useRef<HTMLInputElement>(null);
 
@@ -218,7 +226,19 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
-          {onChangeLlmMode && (
+          {onSwitchToStudio && (
+            <button
+              type="button"
+              onClick={onSwitchToStudio}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#3A3A44] bg-white border border-[#D8D8DF] hover:border-[#891A23] hover:text-[#111114] rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              title="Open the Video Studio (generate and manage video takes)"
+            >
+              <Clapperboard className="w-3.5 h-3.5 text-[#891A23]" />
+              Video Studio
+            </button>
+          )}
+
+          {onChangeLlmMode && currentUser?.isAdmin && (
             <div
               className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs bg-[#F6F6F7] border border-[#D8D8DF] rounded-md"
               title="Choose how text & brief generation routes between Google Gemini Direct and Gemini via Fal"
@@ -304,6 +324,19 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
                 Backup
               </button>
             </>
+          )}
+
+          {currentUser && (
+            <button
+              type="button"
+              onClick={() => void logout()}
+              title={`Signed in as ${currentUser.email}. Click to sign out.`}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-[#5A5A66] bg-white border border-[#D8D8DF] hover:border-[#891A23] hover:text-[#111114] rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden lg:inline max-w-[140px] truncate">{currentUser.email}</span>
+              <span className="lg:hidden">Sign out</span>
+            </button>
           )}
         </div>
       </div>

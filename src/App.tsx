@@ -56,9 +56,11 @@ import { CheckCircle2, AlertCircle, History, Sparkles, Layers, Grid, ChevronDown
 
 interface AppProps {
   currentUser: AuthUser;
+  /** Opens the Production Pipeline (storyboards, brand bible, call sheets). */
+  onSwitchToPipeline?: () => void;
 }
 
-export default function App({ currentUser }: AppProps) {
+export default function App({ currentUser, onSwitchToPipeline }: AppProps) {
   // Server-backed sessions (studios). Loaded from the API on mount.
   const [projects, setProjects] = useState<FluxProject[]>([]);
   const [sessionsLoaded, setSessionsLoaded] = useState<boolean>(false);
@@ -913,6 +915,7 @@ export default function App({ currentUser }: AppProps) {
       <Header
         onLoadPreset={handleLoadPreset}
         currentUser={currentUser}
+        onOpenPipeline={onSwitchToPipeline}
         onOpenUsage={() => setIsUsageOpen(true)}
         currentView={currentView}
         onChangeView={setCurrentView}

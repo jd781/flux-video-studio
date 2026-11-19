@@ -26,6 +26,8 @@ interface HeaderProps {
     title: string;
   }) => void;
   currentUser: AuthUser;
+  /** Switches to the Production Pipeline. Hidden when not provided. */
+  onOpenPipeline?: () => void;
   onOpenUsage: () => void;
   currentView?: 'studio' | 'gallery';
   onChangeView?: (view: 'studio' | 'gallery') => void;
@@ -41,6 +43,7 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   onLoadPreset,
   currentUser,
+  onOpenPipeline,
   onOpenUsage,
   currentView = 'studio',
   onChangeView,
@@ -199,6 +202,18 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Right Toolset: Presets & Credits */}
       <div className="flex items-center gap-2.5">
+        {onOpenPipeline && (
+          <button
+            type="button"
+            onClick={onOpenPipeline}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg bg-neutral-900/60 hover:bg-neutral-800/80 text-neutral-300 hover:text-white border border-white/[0.08] transition-colors"
+            title="Open the Production Pipeline: brand bible, storyboard, shoot plan"
+          >
+            <Layers className="w-3.5 h-3.5 text-neutral-400" />
+            <span className="hidden sm:inline">Production Pipeline</span>
+          </button>
+        )}
+
         {/* Preset Scenes Dropdown */}
         <div className="relative">
           <button

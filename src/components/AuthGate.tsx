@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import App from '../App';
+import { AppShell } from './AppShell';
 import { LoginScreen } from './LoginScreen';
 import { AuthUser, fetchMe } from '../lib/auth';
 import { Loader2 } from 'lucide-react';
@@ -42,5 +42,5 @@ export const AuthGate: React.FC = () => {
     return <LoginScreen />;
   }
 
-  return <App currentUser={user} />;
+  return <AppShell currentUser={user} />;
 };

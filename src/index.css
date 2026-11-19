@@ -57,3 +57,126 @@ input[type="range"]::-webkit-slider-thumb:hover {
 input[type="range"]::-webkit-slider-thumb:active {
   transform: scale(1.05);
 }
+
+/* ==========================================================================
+   Production Pipeline (52Launch brand, light theme)
+   Everything here is scoped to .pipeline-app so the dark Video Studio keeps
+   its own look. Tokens come from the 52Launch brand guide.
+   ========================================================================== */
+:root {
+  --font-display: 'Outfit', system-ui, sans-serif;
+  --font-pipeline-sans: 'Plus Jakarta Sans', system-ui, sans-serif;
+  --font-pipeline-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --brand-red: #C6202F;       /* Pantone 1795 C */
+  --brand-red-hover: #AD1A27;
+  --brand-burgundy: #891A23;  /* Pantone 187 C */
+  --brand-burgundy-hover: #6E141C;
+  --brand-canvas: #F6F6F7;
+  --brand-surface: #FFFFFF;
+  --brand-inset: #EFEFF2;
+  --brand-border: #E2E2E6;
+  --brand-ink: #111114;
+  --brand-muted: #5A5A66;
+}
+
+.pipeline-app {
+  font-family: var(--font-pipeline-sans);
+  background-color: var(--brand-canvas);
+  color: var(--brand-ink);
+}
+.pipeline-app h1,
+.pipeline-app h2,
+.pipeline-app h3,
+.pipeline-app h4,
+.pipeline-app .font-display {
+  font-family: var(--font-display);
+}
+.pipeline-app .font-mono {
+  font-family: var(--font-pipeline-mono);
+}
+.pipeline-app .font-mono,
+.pipeline-app .tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Signature 52Launch curved top-right corner */
+.brand-corner {
+  border-radius: 6px 20px 6px 6px;
+}
+.brand-corner-sm {
+  border-radius: 4px 14px 4px 4px;
+}
+
+.pipeline-app ::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+.pipeline-app ::-webkit-scrollbar-track {
+  background: #EFEFF2;
+}
+.pipeline-app ::-webkit-scrollbar-thumb {
+  background: #C8C8D0;
+  border-radius: 4px;
+}
+.pipeline-app ::-webkit-scrollbar-thumb:hover {
+  background: #891A23;
+}
+
+/* The Studio's white-on-dark range sliders are invisible on the light theme. */
+.pipeline-app input[type="range"] {
+  background: #D8D8DF;
+}
+.pipeline-app input[type="range"]::-webkit-slider-thumb {
+  background: #C6202F;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+.pipeline-app input[type="range"]::-webkit-slider-thumb:hover {
+  background: #AD1A27;
+}
+
+/* Print-ready PDF export */
+@media print {
+  @page {
+    size: letter portrait;
+    margin: 0.45in;
+  }
+  html,
+  body {
+    background: #FFFFFF !important;
+    color: #111114 !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .print-only-full {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    background: #FFFFFF !important;
+    color: #111114 !important;
+  }
+  .print-page {
+    break-after: page;
+    page-break-after: always;
+    box-shadow: none !important;
+    border: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  .print-page:last-child {
+    break-after: auto;
+    page-break-after: auto;
+  }
+  .print-avoid-break {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}
