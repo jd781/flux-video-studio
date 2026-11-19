@@ -40,6 +40,9 @@ import {
 } from './falService';
 import { FLUX3_ENDPOINTS } from '../src/utils/flux3';
 import { renderAdminPage } from './adminPage';
+import { createPipelineRouter } from './pipelineRoutes';
+import { actorMiddleware } from './projectStore';
+import { createRateLimiter } from './rateLimit';
 import {
   checkGeneratePayload,
   describeFalFailure,
@@ -62,14 +65,32 @@ const app = express();
 const PORT = Number(process.env.FAL_PROXY_PORT) || 3001;
 const isProd = process.env.NODE_ENV === 'production';
 
-app.use(express.json({ limit: '25mb' }));
-
 if (!process.env.FAL_KEY) {
   console.warn('[server] WARNING: FAL_KEY is not set. Generation will fail until configured.');
 }
 
-// Session + Google OAuth (adds /auth/* and /api/me).
+// Session + Google OAuth (adds /auth/* and /api/me). Must run before body
+// parsing so the large pipeline bodies below are only read for signed-in users.
 configureAuth(app);
+
+// 52Launch pipeline (projects + AI steps). These carry base64 media, so they get
+// a larger body limit, applied only AFTER authentication. The global parser
+// below skips bodies already parsed here.
+app.use(
+  ['/api/projects', '/api/pipeline'],
+  requireAuth,
+  express.json({ limit: '150mb' }),
+  // After the body parser: parsers run in their own async context and would
+  // drop the signed-in-user binding that project access checks rely on.
+  actorMiddleware
+);
+app.use('/api/pipeline', createRateLimiter(60, 60_000));
+
+app.use(express.json({ limit: '25mb' }));
+
+// The pipeline router only defines /projects/* and /pipeline/* (both gated
+// above). Keep it that way: it is mounted on /api without its own auth.
+app.use('/api', createPipelineRouter());
 
 // --- fal storage upload proxy (authenticated) ---
 // Only used by the browser to upload reference media to fal storage. Generation
