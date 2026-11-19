@@ -1,3 +1,7 @@
+import { MODEL_CATALOG, clampDurationForModel } from './modelCatalog';
+import { isPerSecondModel } from './perSecondPricing';
+import { calculateCost } from './fluxVideoUtils';
+
 export type StudioModelId =
   | 'seedance-2.5'
   | 'seedance-2.0'
@@ -148,6 +152,76 @@ export const FLUX3_ENDPOINTS = {
   enhance: 'blackforestlabs/flux-3/draft-enhance',
 } as const;
 
+type DerivedModelId = Extract<StudioModelId, 'kling-4.0' | 'wan-3.0-prime' | 'luma-ray-3.2' | 'veo-3.1' | 'veo-3.1-fast' | 'gemini-omni-flash'>;
+
+/** UI-only details the shared model catalog doesn't carry. */
+const DERIVED_EXTRAS: Record<
+  DerivedModelId,
+  Pick<
+    StudioModelSpec,
+    | 'durationFormat'
+    | 'supportsOptionalEndFrameInI2V'
+    | 'supportsReferenceElements'
+    | 'supportsReferenceAudio'
+  >
+> = {
+  'kling-4.0': {
+    durationFormat: 'number',
+    supportsOptionalEndFrameInI2V: true,
+    supportsReferenceElements: true,
+  },
+  'wan-3.0-prime': {
+    durationFormat: 'number',
+    supportsOptionalEndFrameInI2V: true,
+    supportsReferenceAudio: true,
+  },
+  'luma-ray-3.2': { durationFormat: 'string_s', supportsOptionalEndFrameInI2V: true },
+  'veo-3.1': { durationFormat: 'string_s', supportsOptionalEndFrameInI2V: true },
+  'veo-3.1-fast': { durationFormat: 'string_s', supportsOptionalEndFrameInI2V: true },
+  'gemini-omni-flash': { durationFormat: 'number' },
+};
+
+function derivedStudioModels(): Record<DerivedModelId, StudioModelSpec> {
+  const out = {} as Record<DerivedModelId, StudioModelSpec>;
+  for (const id of Object.keys(DERIVED_EXTRAS) as DerivedModelId[]) {
+    const m = MODEL_CATALOG[id];
+    out[id] = {
+      id,
+      family: m.family as StudioModelFamily,
+      label: m.label,
+      tagline: m.tagline,
+      resolutions: m.resolutions,
+      resolutionsByMode: m.resolutionsByMode,
+      resolutionSelectable: m.resolutionSelectable,
+      aspectRatios: m.aspectRatios,
+      aspectRatiosByMode: m.aspectRatiosByMode,
+      minDuration: m.minDuration,
+      maxDuration: m.maxDuration,
+      durations: m.durations,
+      workflowModes: m.workflowModes,
+      supportsTaskMode: m.supportsTaskMode,
+      supportsSeed: m.supportsSeed,
+      supportsSafetyTolerance: m.supportsSafetyTolerance,
+      supportsDraftEnhance: m.supportsDraftEnhance,
+      maxReferenceImages: m.maxReferenceImages,
+      maxReferenceVideos: m.maxReferenceVideos,
+      maxTimelineFrames: m.maxTimelineFrames,
+      draftResolution: m.draftResolution,
+      finalResolution: m.finalResolution,
+      endpoints: {
+        textToVideo: m.endpoints.textToVideo,
+        imageToVideo: m.endpoints.imageToVideo,
+        firstLastToVideo: m.endpoints.firstLastToVideo,
+        referenceToVideo: m.endpoints.referenceToVideo,
+        videoEdit: m.endpoints.videoEdit,
+        reframe: m.endpoints.reframe,
+        extendVideo: m.endpoints.extendVideo,
+      },
+      ...DERIVED_EXTRAS[id],
+    };
+  }
+  return out;
+}
 export const STUDIO_MODELS: Record<StudioModelId, StudioModelSpec> = {
   'seedance-2.0': {
     id: 'seedance-2.0',
@@ -262,230 +336,9 @@ export const STUDIO_MODELS: Record<StudioModelId, StudioModelSpec> = {
       draftEnhance: FLUX3_ENDPOINTS.enhance,
     },
   },
-  'kling-4.0': {
-    id: 'kling-4.0',
-    family: 'kling',
-    label: 'Kling 4.0',
-    tagline: '3–30s · T2V, I2V (start/end), @Element refs & V2V Edit',
-    resolutions: ['720p', '1080p'],
-    resolutionSelectable: true,
-    aspectRatios: ['16:9', '9:16', '1:1', '21:9'],
-    aspectRatiosByMode: {
-      reference_to_video: ['auto', '16:9', '9:16', '1:1', '21:9'],
-    },
-    minDuration: 3,
-    maxDuration: 30,
-    durationFormat: 'number',
-    workflowModes: [
-      'text_to_video',
-      'image_to_video',
-      'reference_to_video',
-      'video_edit',
-    ],
-    supportsTaskMode: false,
-    supportsSeed: false,
-    supportsSafetyTolerance: false,
-    supportsDraftEnhance: false,
-    supportsOptionalEndFrameInI2V: true,
-    supportsReferenceElements: true,
-    maxReferenceImages: 10,
-    maxReferenceVideos: 3,
-    maxTimelineFrames: 0,
-    draftResolution: '720p',
-    finalResolution: '720p',
-    endpoints: {
-      textToVideo: 'kling/v4/text-to-video',
-      imageToVideo: 'kling/v4/image-to-video',
-      referenceToVideo: 'kling/v4/reference-to-video',
-      videoEdit: 'kling/v4/video-to-video/edit',
-    },
-  },
-  'wan-3.0-prime': {
-    id: 'wan-3.0-prime',
-    family: 'wan',
-    label: 'Wan 3.0 Prime',
-    tagline: 'Alibaba · T2V, I2V (start/end) & multi-modal Ref + Audio',
-    resolutions: ['720p', '1080p'],
-    resolutionSelectable: true,
-    aspectRatios: ['16:9', '9:16', '1:1'],
-    minDuration: 5,
-    maxDuration: 15,
-    durations: [5, 10, 15],
-    durationFormat: 'number',
-    workflowModes: ['text_to_video', 'image_to_video', 'reference_to_video'],
-    supportsTaskMode: false,
-    supportsSeed: true,
-    supportsSafetyTolerance: false,
-    supportsDraftEnhance: false,
-    supportsOptionalEndFrameInI2V: true,
-    supportsReferenceAudio: true,
-    maxReferenceImages: 8,
-    maxReferenceVideos: 3,
-    maxTimelineFrames: 0,
-    draftResolution: '720p',
-    finalResolution: '720p',
-    endpoints: {
-      textToVideo: 'alibaba/wan-3.0-prime/text-to-video',
-      imageToVideo: 'alibaba/wan-3.0-prime/image-to-video',
-      referenceToVideo: 'alibaba/wan-3.0-prime/reference-to-video',
-    },
-  },
-  'luma-ray-3.2': {
-    id: 'luma-ray-3.2',
-    family: 'luma',
-    label: 'Luma Ray 3.2',
-    tagline: '540p–1080p · V2V Restyle & Reframe outpaint',
-    resolutions: ['540p', '720p', '1080p'],
-    resolutionSelectable: true,
-    aspectRatios: ['16:9', '9:16', '1:1', '21:9', '4:3', '3:4'],
-    minDuration: 5,
-    maxDuration: 10,
-    durations: [5, 9, 10],
-    durationFormat: 'string_s',
-    workflowModes: [
-      'text_to_video',
-      'image_to_video',
-      'video_edit',
-      'video_reframe',
-    ],
-    supportsTaskMode: false,
-    supportsSeed: false,
-    supportsSafetyTolerance: false,
-    supportsDraftEnhance: false,
-    supportsOptionalEndFrameInI2V: true,
-    maxReferenceImages: 0,
-    maxReferenceVideos: 1,
-    maxTimelineFrames: 0,
-    draftResolution: '540p',
-    finalResolution: '720p',
-    endpoints: {
-      textToVideo: 'luma/agent/ray/v3.2/text-to-video',
-      imageToVideo: 'luma/agent/ray/v3.2/image-to-video',
-      videoEdit: 'luma/agent/ray/v3.2/video-to-video',
-      reframe: 'luma/agent/ray/v3.2/reframe',
-    },
-  },
-  'veo-3.1': {
-    id: 'veo-3.1',
-    family: 'veo',
-    label: 'Google Veo 3.1',
-    tagline: 'Google DeepMind · 720p–4K, native audio, T2V, I2V, Refs & Extend',
-    resolutions: ['720p', '1080p', '2160p'],
-    resolutionsByMode: {
-      text_to_video: ['720p', '1080p', '2160p'],
-      image_to_video: ['720p', '1080p', '2160p'],
-      first_last_frame: ['720p', '1080p', '2160p'],
-      reference_to_video: ['720p', '1080p', '2160p'],
-      video_extend: ['720p'],
-    },
-    resolutionSelectable: true,
-    aspectRatios: ['auto', '16:9', '9:16'],
-    aspectRatiosByMode: {
-      text_to_video: ['16:9', '9:16'],
-      reference_to_video: ['16:9', '9:16'],
-    },
-    minDuration: 4,
-    maxDuration: 8,
-    durations: [4, 6, 8],
-    durationFormat: 'string_s',
-    workflowModes: [
-      'text_to_video',
-      'image_to_video',
-      'first_last_frame',
-      'reference_to_video',
-      'video_extend',
-    ],
-    supportsTaskMode: false,
-    supportsSeed: true,
-    supportsSafetyTolerance: false,
-    supportsDraftEnhance: false,
-    supportsOptionalEndFrameInI2V: true,
-    maxReferenceImages: 3,
-    maxReferenceVideos: 0,
-    maxTimelineFrames: 0,
-    draftResolution: '720p',
-    finalResolution: '1080p',
-    endpoints: {
-      textToVideo: 'fal-ai/veo3.1',
-      imageToVideo: 'fal-ai/veo3.1/image-to-video',
-      firstLastToVideo: 'fal-ai/veo3.1/first-last-frame-to-video',
-      referenceToVideo: 'fal-ai/veo3.1/reference-to-video',
-      extendVideo: 'fal-ai/veo3.1/extend-video',
-    },
-  },
-  'veo-3.1-fast': {
-    id: 'veo-3.1-fast',
-    family: 'veo',
-    label: 'Google Veo 3.1 Fast',
-    tagline: 'Google DeepMind · Rapid & lower-cost 720p–4K, Audio, I2V & Extend',
-    resolutions: ['720p', '1080p', '2160p'],
-    resolutionsByMode: {
-      text_to_video: ['720p', '1080p', '2160p'],
-      image_to_video: ['720p', '1080p', '2160p'],
-      first_last_frame: ['720p', '1080p', '2160p'],
-      video_extend: ['720p'],
-    },
-    resolutionSelectable: true,
-    aspectRatios: ['auto', '16:9', '9:16'],
-    aspectRatiosByMode: {
-      text_to_video: ['16:9', '9:16'],
-    },
-    minDuration: 4,
-    maxDuration: 8,
-    durations: [4, 6, 8],
-    durationFormat: 'string_s',
-    workflowModes: [
-      'text_to_video',
-      'image_to_video',
-      'first_last_frame',
-      'video_extend',
-    ],
-    supportsTaskMode: false,
-    supportsSeed: true,
-    supportsSafetyTolerance: false,
-    supportsDraftEnhance: false,
-    supportsOptionalEndFrameInI2V: true,
-    maxReferenceImages: 0,
-    maxReferenceVideos: 0,
-    maxTimelineFrames: 0,
-    draftResolution: '720p',
-    finalResolution: '1080p',
-    endpoints: {
-      textToVideo: 'fal-ai/veo3.1/fast',
-      imageToVideo: 'fal-ai/veo3.1/fast/image-to-video',
-      firstLastToVideo: 'fal-ai/veo3.1/fast/first-last-frame-to-video',
-      extendVideo: 'fal-ai/veo3.1/fast/extend-video',
-    },
-  },
-  'gemini-omni-flash': {
-    id: 'gemini-omni-flash',
-    family: 'gemini-omni',
-    label: 'Google Gemini Omni Flash',
-    tagline: 'Google DeepMind · Text-to-Video, Reference-to-Video & V2V Edit + Audio',
-    resolutions: ['720p', '1080p'],
-    resolutionSelectable: true,
-    aspectRatios: ['auto', '16:9', '9:16', '1:1'],
-    minDuration: 4,
-    maxDuration: 8,
-    durations: [4, 6, 8],
-    durationFormat: 'string_s',
-    workflowModes: ['text_to_video', 'reference_to_video', 'video_edit'],
-    supportsTaskMode: false,
-    supportsSeed: true,
-    supportsSafetyTolerance: false,
-    supportsDraftEnhance: false,
-    maxReferenceImages: 3,
-    maxReferenceVideos: 1,
-    maxTimelineFrames: 0,
-    draftResolution: '720p',
-    finalResolution: '1080p',
-    endpoints: {
-      textToVideo: 'google/gemini-omni-flash',
-      imageToVideo: 'google/gemini-omni-flash/reference-to-video',
-      referenceToVideo: 'google/gemini-omni-flash/reference-to-video',
-      videoEdit: 'google/gemini-omni-flash/edit',
-    },
-  },
+  // Kling, Wan, Luma, Veo and Gemini Omni are derived from the shared model catalog
+  // (utils/modelCatalog.ts) so their limits are defined once.
+  ...derivedStudioModels(),
 };
 
 export interface StudioFamilyInfo {
@@ -557,6 +410,8 @@ export function getStudioFamily(id: StudioModelId): StudioFamilyInfo {
 }
 
 export function clampStudioDuration(modelId: StudioModelId, duration: number): number {
+  // Models with discrete lengths (Luma 5/10s, Veo 4/6/8s) snap to a valid one.
+  if (isPerSecondModel(modelId)) return clampDurationForModel(modelId, duration);
   const m = getStudioModel(modelId);
   return Math.min(m.maxDuration, Math.max(m.minDuration, Math.round(duration)));
 }
@@ -604,6 +459,11 @@ export function resolveStudioResolution(params: {
     : available[available.length - 1];
 }
 
+/**
+ * Estimated cost shown before generating. Delegates to the same calculation the
+ * Video Studio uses (utils/fluxVideoUtils.ts), so both areas show one number and
+ * the server's recorded cost is the only other figure to compare against.
+ */
 export function estimateStudioCostUsd(params: {
   modelId: StudioModelId;
   qualityTier: StudioQualityTier;
@@ -611,69 +471,13 @@ export function estimateStudioCostUsd(params: {
   resolution?: StudioResolution;
   duration: number;
   nativeAudio?: boolean;
+  /** A source or reference video is attached (Kling bills these differently). */
+  hasVideoInput?: boolean;
 }): number {
-  const dur = clampStudioDuration(params.modelId, params.duration);
-  const res = resolveStudioResolution(params);
-
-  if (params.modelId === 'flux-3') {
-    const isExtend =
-      params.workflowMode === 'video_extend' || params.workflowMode === 'reference_to_video';
-    if (params.qualityTier === 'draft') {
-      const rate = isExtend ? 0.12 : 0.06;
-      return Math.round(rate * dur * 100) / 100;
-    }
-    if (isExtend) {
-      const rate = res === '1080p' ? 0.53 : 0.41;
-      return Math.round(rate * dur * 100) / 100;
-    }
-    const rates: Partial<Record<StudioResolution, number>> = {
-      '720p': 0.17,
-      '1080p': 0.29,
-      '1440p': 0.32,
-      '2160p': 0.47,
-    };
-    const rate = rates[res] ?? 0.29;
-    return Math.round(rate * dur * 100) / 100;
-  }
-
-  if (params.modelId === 'kling-4.0') {
-    const rate = res === '1080p' ? 0.14 : 0.09;
-    return Math.round(rate * dur * 100) / 100;
-  }
-
-  if (params.modelId === 'wan-3.0-prime') {
-    const rate = res === '1080p' ? 0.12 : 0.08;
-    return Math.round(rate * dur * 100) / 100;
-  }
-
-  if (params.modelId === 'luma-ray-3.2') {
-    const rate = res === '1080p' ? 0.14 : res === '720p' ? 0.09 : 0.05;
-    return Math.round(rate * dur * 100) / 100;
-  }
-
-  if (params.modelId === 'veo-3.1') {
-    const rate = params.nativeAudio === false ? 0.2 : 0.4;
-    return Math.round(rate * dur * 100) / 100;
-  }
-
-  if (params.modelId === 'veo-3.1-fast') {
-    const rate = params.nativeAudio === false ? 0.1 : 0.15;
-    return Math.round(rate * dur * 100) / 100;
-  }
-
-  if (params.modelId === 'gemini-omni-flash') {
-    const rate = params.nativeAudio === false ? 0.1 : 0.18;
-    return Math.round(rate * dur * 100) / 100;
-  }
-
-  const basePerSec =
-    params.modelId === 'seedance-2.0'
-      ? params.qualityTier === 'draft'
-        ? 0.04
-        : 0.08
-      : params.qualityTier === 'draft'
-        ? 0.06
-        : 0.14;
-  const audioMultiplier = params.nativeAudio ? 1.25 : 1.0;
-  return Math.round(basePerSec * audioMultiplier * dur * 100) / 100;
+  return calculateCost(params.modelId, params.duration, params.qualityTier, {
+    workflowMode: params.workflowMode,
+    resolution: params.resolution,
+    nativeAudio: params.nativeAudio,
+    hasVideoInput: params.hasVideoInput,
+  }).dollars;
 }

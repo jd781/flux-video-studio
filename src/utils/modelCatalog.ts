@@ -251,10 +251,12 @@ export const MODEL_CATALOG: Record<ModelId, ModelCapabilities> = {
     maxDuration: 30,
     durationRange: { min: 3, max: 30 },
     durationFromSource: ['video_edit'],
+    // fal schema: up to 10 reference images and 5 reference videos (3-30s each,
+    // 300 MB), 15 references in total with elements.
     maxReferenceImages: 10,
-    maxReferenceVideos: 3,
+    maxReferenceVideos: 5,
     maxTotalReferences: 15,
-    maxReferenceVideoMB: 100,
+    maxReferenceVideoMB: 300,
     maxTimelineFrames: 0,
     workflowModes: [
       'text_to_video',
@@ -290,9 +292,11 @@ export const MODEL_CATALOG: Record<ModelId, ModelCapabilities> = {
     minDuration: 2,
     maxDuration: 30,
     durationRange: { min: 2, max: 30 },
-    maxReferenceImages: 8,
-    maxReferenceVideos: 3,
-    maxTotalReferences: 11,
+    // fal schema: up to 10 reference images, 5 reference videos (15s combined)
+    // and 5 audio clips.
+    maxReferenceImages: 10,
+    maxReferenceVideos: 5,
+    maxTotalReferences: 20,
     maxReferenceVideoMB: 100,
     maxTimelineFrames: 0,
     workflowModes: [
