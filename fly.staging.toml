@@ -1,0 +1,37 @@
+# Fly.io config for the STAGING copy of FLUX Video Studio + Production Pipeline.
+#
+# Separate app, separate volume, separate secrets from production (fly.toml).
+# Always deploy it explicitly:
+#   fly deploy -c fly.staging.toml
+# Never run a bare `fly deploy` while testing: that targets production.
+#
+# Single-machine deployment (SQLite on a volume), same as production.
+app = "52-video-studio-staging"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  FAL_PROXY_PORT = "8080"
+  DATA_DIR = "/data"
+  # Staging only: create the sample "Kinetix" pipeline project when none exist.
+  SEED_SAMPLE_PROJECT = "true"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+[mounts]
+  source = "flux_data_staging"
+  destination = "/data"
+
+# 2 GB: pipeline saves and imports parse JSON bodies of up to 150 MB.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "2gb"
