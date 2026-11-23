@@ -257,7 +257,7 @@ export const Step1NewProject: React.FC<Step1NewProjectProps> = ({
   const [isDraggingGuidePdf, setIsDraggingGuidePdf] = useState(false);
   const guideFileInputRef = useRef<HTMLInputElement>(null);
 
-  // Sync Firebase Auth listener & existing token on mount
+  // Sync the Drive connection listener & existing token on mount
   useEffect(() => {
     getGoogleDriveAccessToken().then((token) => {
       if (token) setDriveToken(token);

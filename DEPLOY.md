@@ -70,23 +70,34 @@ https://<app-name>.fly.dev/auth/google/callback
 
 (Keep the localhost one for local dev.)
 
+### Google Drive (Production Pipeline)
+
+The pipeline's **Connect Google Drive** button uses the **same OAuth client** as
+the app login. No Firebase is needed. In the Google Cloud project that owns that
+client:
+
+1. **Enable the Google Drive API** (APIs & Services → Library).
+2. **OAuth consent screen**: set the user type to **Internal** (only
+   `@52launch.com` accounts can connect, and Google does not require app
+   verification). Under *Data access / Scopes*, add
+   `https://www.googleapis.com/auth/drive`.
+3. **Authorized JavaScript origins** on the OAuth client: add
+   `https://<app-name>.fly.dev` (and `http://localhost:3001` for local dev). This
+   is separate from the redirect URI above and is required for the Drive popup.
+4. **Workspace admin**: if API access is restricted for your domain
+   (Admin console → Security → API controls), mark this OAuth client as trusted
+   so users are not blocked at the consent step.
+
+The app requests the full `drive` scope because the narrower `drive.file` can only
+touch files the app created itself, which does not allow saving a PDF into an
+existing Shared Drive folder. Connected tokens live in the browser tab's memory,
+last about an hour, and the user reconnects after a reload.
+
 ## 5. Deploy
 
 ```bash
-fly deploy \
-  --build-arg VITE_FIREBASE_API_KEY="..." \
-  --build-arg VITE_FIREBASE_AUTH_DOMAIN="<project>.firebaseapp.com" \
-  --build-arg VITE_FIREBASE_PROJECT_ID="<project>" \
-  --build-arg VITE_FIREBASE_APP_ID="..."
+fly deploy
 ```
-
-The `VITE_FIREBASE_*` build args configure the pipeline's **Connect Google Drive**
-button. Use the Firebase web config of the **company-owned** Firebase / Google
-Cloud project: Google sign-in enabled, this app's hostname under *Authorized
-domains*, the Drive API enabled, and the Drive scopes approved for the Workspace.
-They are web identifiers rather than secrets, but they are baked into the build,
-so changing them means redeploying. Leave them out and the app still works, with
-Drive disabled.
 
 Fly builds the Docker image remotely, runs `npm run build`, and starts the
 server with `npm run start` on internal port 8080.

@@ -3,7 +3,7 @@ import { Loader2 } from 'lucide-react';
 import App from '../App';
 import type { AuthUser } from '../lib/auth';
 
-// The pipeline pulls in PDF export, Firebase and audio encoding, so it is only
+// The pipeline pulls in PDF export and audio encoding, so it is only
 // downloaded when someone opens it.
 const PipelineApp = lazy(() => import('../PipelineApp'));
 

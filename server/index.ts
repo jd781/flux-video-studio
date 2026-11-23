@@ -9,6 +9,7 @@ import {
   requireAuth,
   requireAdmin,
   ADMIN_EMAIL,
+  ALLOWED_DOMAIN,
   type SessionUser,
 } from './auth';
 import {
@@ -553,6 +554,20 @@ app.get('/api/video-proxy', requireAuth, async (req, res) => {
     const msg = err instanceof Error ? err.message : 'proxy failed';
     res.status(502).json({ error: msg });
   }
+});
+
+// Settings the browser needs to connect Google Drive with the same OAuth client
+// the app signs in with. The client ID is public by design (it appears in every
+// Google sign-in URL); the client SECRET is never sent. Needs a signed-in user.
+app.get('/api/drive-config', requireAuth, (req, res) => {
+  const user = req.user as SessionUser;
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  if (!clientId) {
+    res.status(503).json({ error: 'Google OAuth is not configured on this server.' });
+    return;
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ clientId, domain: ALLOWED_DOMAIN, email: user.email });
 });
 
 // Health check (public).

@@ -1,21 +1,21 @@
-import { getApp, getApps, initializeApp } from 'firebase/app';
-import {
-  getAuth,
-  GoogleAuthProvider,
-  onAuthStateChanged,
-  signInWithPopup,
-  signOut,
-  User,
-} from 'firebase/auth';
-import { getFirebaseConfig } from './firebaseConfig';
 import { BrandGuideDocument, ExtractedStyleGuide } from '../types/pipeline';
 import { parseJsonResponse } from './safeFetch';
 
-export const DRIVE_SCOPES = [
-  'https://www.googleapis.com/auth/drive.file',
-  'https://www.googleapis.com/auth/drive.metadata.readonly',
-  'https://www.googleapis.com/auth/drive.readonly',
-];
+/**
+ * Google Drive connection.
+ *
+ * The browser gets a short-lived Drive access token from Google Identity
+ * Services, using the SAME OAuth client the app signs in with (no Firebase). The
+ * token is kept in memory only (never localStorage/sessionStorage), is sent to
+ * our server in the X-Google-Drive-Token header for each Drive call, and expires
+ * after about an hour, after which the user reconnects.
+ *
+ * Scope: full `drive`. The narrower `drive.file` only covers files the app
+ * itself created, so it can't save a PDF into an existing Shared Drive folder
+ * someone picked. The OAuth consent screen should be set to Internal, which
+ * limits access to the workspace and needs no Google verification.
+ */
+export const DRIVE_SCOPES = ['https://www.googleapis.com/auth/drive'];
 
 export interface DriveUser {
   email: string | null;
@@ -23,136 +23,288 @@ export interface DriveUser {
   photoURL?: string | null;
 }
 
-/**
- * Firebase is initialised on first use, not at import, so the app still loads
- * (with Drive disabled) when no Firebase config was provided at build time.
- */
-const NOT_CONFIGURED_MESSAGE =
-  'Google Drive is not set up for this deployment. Ask an admin to add the Firebase settings (VITE_FIREBASE_*).';
-
-let authInstance: ReturnType<typeof getAuth> | null = null;
-function getDriveAuth(): ReturnType<typeof getAuth> {
-  if (authInstance) return authInstance;
-  const config = getFirebaseConfig();
-  if (!config) throw new Error(NOT_CONFIGURED_MESSAGE);
-  const app = getApps().length > 0 ? getApp() : initializeApp(config);
-  authInstance = getAuth(app);
-  return authInstance;
+// ---- minimal typing for the Google Identity Services script ----------------
+interface GisTokenResponse {
+  access_token?: string;
+  expires_in?: number | string;
+  error?: string;
+  error_description?: string;
+  scope?: string;
+}
+interface GisTokenClient {
+  requestAccessToken: (overrides?: { prompt?: string }) => void;
+}
+interface GisOAuth2 {
+  initTokenClient: (config: {
+    client_id: string;
+    scope: string;
+    hd?: string;
+    login_hint?: string;
+    prompt?: string;
+    callback: (resp: GisTokenResponse) => void;
+    error_callback?: (err: { type?: string; message?: string }) => void;
+  }) => GisTokenClient;
+  hasGrantedAllScopes: (resp: GisTokenResponse, ...scopes: string[]) => boolean;
+  revoke: (token: string, done?: () => void) => void;
+}
+declare global {
+  interface Window {
+    google?: { accounts?: { oauth2?: GisOAuth2 } };
+  }
 }
 
-const provider = new GoogleAuthProvider();
-for (const scope of DRIVE_SCOPES) {
-  provider.addScope(scope);
+const GIS_SRC = 'https://accounts.google.com/gsi/client';
+let gisLoad: Promise<GisOAuth2> | null = null;
+
+function loadGis(): Promise<GisOAuth2> {
+  const ready = window.google?.accounts?.oauth2;
+  if (ready) return Promise.resolve(ready);
+  if (gisLoad) return gisLoad;
+  gisLoad = new Promise<GisOAuth2>((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = GIS_SRC;
+    script.async = true;
+    script.onload = () => {
+      const oauth2 = window.google?.accounts?.oauth2;
+      if (oauth2) resolve(oauth2);
+      else {
+        gisLoad = null;
+        reject(new Error('Google sign-in did not load. Reload the page and try again.'));
+      }
+    };
+    script.onerror = () => {
+      gisLoad = null;
+      reject(
+        new Error(
+          'Could not load Google sign-in. Check your connection, or an ad blocker blocking accounts.google.com.'
+        )
+      );
+    };
+    document.head.appendChild(script);
+  });
+  return gisLoad;
 }
 
-// In-memory token caching (never localStorage/sessionStorage)
+interface DriveConfig {
+  clientId: string;
+  domain: string;
+  email: string;
+}
+let configLoad: Promise<DriveConfig> | null = null;
+
+/** Public OAuth settings from our server (needs the app login). */
+function loadDriveConfig(): Promise<DriveConfig> {
+  if (configLoad) return configLoad;
+  configLoad = (async () => {
+    const res = await fetch('/api/drive-config', { credentials: 'include' });
+    if (res.status === 401) {
+      throw new Error('Your session expired. Reload the page and sign in again.');
+    }
+    const data = (await res.json().catch(() => null)) as Partial<DriveConfig> | null;
+    if (!res.ok || !data?.clientId) {
+      throw new Error(
+        'Google Drive is not set up on this server (missing Google OAuth client). Ask an admin.'
+      );
+    }
+    return { clientId: data.clientId, domain: data.domain ?? '', email: data.email ?? '' };
+  })().catch((err) => {
+    configLoad = null;
+    throw err;
+  });
+  return configLoad;
+}
+
+// ---- in-memory connection state ---------------------------------------------
 let isSigningIn = false;
 let cachedAccessToken: string | null = null;
+let cachedExpiresAt = 0;
 let cachedUser: DriveUser | null = null;
 let authSuccessCallback: ((user: DriveUser, token: string) => void) | null = null;
 let authFailureCallback: (() => void) | null = null;
 
-function mapFirebaseUser(user: User): DriveUser {
-  return {
-    email: user.email || 'Google Drive Connected',
-    displayName: user.displayName || 'Google User',
-    photoURL: user.photoURL,
-  };
+function tokenIsLive(): boolean {
+  // Treat a token as expired 30s early so a request never starts with one about to lapse.
+  return Boolean(cachedAccessToken) && Date.now() < cachedExpiresAt - 30_000;
 }
 
+function dropExpiredToken(): void {
+  if (cachedAccessToken && !tokenIsLive()) {
+    cachedAccessToken = null;
+    cachedExpiresAt = 0;
+  }
+}
+
+/**
+ * Registers callbacks for the connection state. Fires once straight away:
+ * success when a live token is held, otherwise failure ("not connected").
+ * Returns an unsubscribe function.
+ */
 export function initDriveAuth(
   onAuthSuccess?: (user: DriveUser, token: string) => void,
   onAuthFailure?: () => void
-) {
+): () => void {
   authSuccessCallback = onAuthSuccess || null;
   authFailureCallback = onAuthFailure || null;
-
-  if (!getFirebaseConfig()) {
-    // Drive is optional: report "not connected" and hand back a no-op unsubscribe.
-    if (onAuthFailure) onAuthFailure();
-    return () => {};
-  }
-
-  return onAuthStateChanged(getDriveAuth(), (user: User | null) => {
-    if (user) {
-      const mapped = mapFirebaseUser(user);
-      cachedUser = mapped;
-      if (cachedAccessToken) {
-        if (onAuthSuccess) onAuthSuccess(mapped, cachedAccessToken);
-      } else if (!isSigningIn) {
-        cachedAccessToken = null;
-        if (onAuthFailure) onAuthFailure();
-      }
+  let active = true;
+  queueMicrotask(() => {
+    if (!active) return;
+    dropExpiredToken();
+    if (tokenIsLive() && cachedUser && cachedAccessToken) {
+      onAuthSuccess?.(cachedUser, cachedAccessToken);
     } else {
-      cachedAccessToken = null;
-      cachedUser = null;
-      if (onAuthFailure) onAuthFailure();
+      onAuthFailure?.();
     }
   });
+  return () => {
+    active = false;
+    if (authSuccessCallback === onAuthSuccess) authSuccessCallback = null;
+    if (authFailureCallback === onAuthFailure) authFailureCallback = null;
+  };
 }
 
 export async function getGoogleDriveAccessToken(): Promise<string | null> {
+  dropExpiredToken();
   return cachedAccessToken;
 }
 
 export function getGoogleDriveUser(): DriveUser | null {
-  return cachedUser;
+  dropExpiredToken();
+  return cachedAccessToken ? cachedUser : null;
 }
 
 export function clearGoogleDriveToken(): void {
   cachedAccessToken = null;
+  cachedExpiresAt = 0;
   cachedUser = null;
 }
 
 export function setCachedGoogleDriveAccessToken(token: string | null): void {
   cachedAccessToken = token;
+  // Callers that inject a token don't know its lifetime; assume the usual hour.
+  cachedExpiresAt = token ? Date.now() + 55 * 60_000 : 0;
 }
 
+/** Who owns the token, from Drive itself. Also proves the token works. */
+async function fetchDriveUser(token: string): Promise<DriveUser> {
+  const res = await fetch(
+    'https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,displayName,photoLink)',
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (!res.ok) {
+    throw new Error(
+      res.status === 403
+        ? 'Google Drive access was not granted. Click Connect again and allow access to Google Drive.'
+        : `Google Drive did not accept the sign-in (HTTP ${res.status}). Try again.`
+    );
+  }
+  const data = (await res.json()) as {
+    user?: { emailAddress?: string; displayName?: string; photoLink?: string };
+  };
+  return {
+    email: data.user?.emailAddress || null,
+    displayName: data.user?.displayName || null,
+    photoURL: data.user?.photoLink || null,
+  };
+}
+
+/**
+ * Opens Google's consent popup and stores the resulting Drive token. Must be
+ * called from a click: browsers block popups opened after other awaits.
+ * `forceConsent` re-shows the permission screen (use it when scopes are missing).
+ */
 export async function signInWithGoogleDrive(forceConsent = false): Promise<{
   user: DriveUser;
   accessToken: string;
 }> {
   isSigningIn = true;
   try {
-    provider.setCustomParameters({
-      prompt: forceConsent ? 'consent' : 'select_account',
+    const [oauth2, config] = await Promise.all([loadGis(), loadDriveConfig()]);
+
+    const resp = await new Promise<GisTokenResponse>((resolve, reject) => {
+      const client = oauth2.initTokenClient({
+        client_id: config.clientId,
+        scope: DRIVE_SCOPES.join(' '),
+        // Hints only. The account is verified below.
+        hd: config.domain || undefined,
+        login_hint: config.email || undefined,
+        callback: (r) => {
+          if (r.error) {
+            reject(
+              new Error(
+                r.error === 'access_denied'
+                  ? 'Google Drive access was declined. Click Connect again and allow access.'
+                  : r.error_description || `Google sign-in failed (${r.error}).`
+              )
+            );
+          } else {
+            resolve(r);
+          }
+        },
+        error_callback: (err) => {
+          reject(
+            new Error(
+              err.type === 'popup_closed'
+                ? 'The Google sign-in window was closed before finishing.'
+                : err.type === 'popup_failed_to_open'
+                  ? 'Your browser blocked the Google sign-in popup. Allow popups for this site and try again.'
+                  : err.message || 'Google sign-in failed.'
+            )
+          );
+        },
+      });
+      client.requestAccessToken({ prompt: forceConsent ? 'consent' : '' });
     });
 
-    const result = await signInWithPopup(getDriveAuth(), provider);
-    const credential = GoogleAuthProvider.credentialFromResult(result);
-    const accessToken = credential?.accessToken;
+    const accessToken = resp.access_token;
+    if (!accessToken) throw new Error('Failed to get a Google Drive access token from sign-in.');
 
-    if (!accessToken) {
-      throw new Error('Failed to get Google Drive access token from sign-in.');
+    if (!oauth2.hasGrantedAllScopes(resp, ...DRIVE_SCOPES)) {
+      oauth2.revoke(accessToken);
+      throw new Error(
+        'Google Drive permission was not fully granted. Click Connect again and allow access to Google Drive.'
+      );
     }
 
-    const userInfo = mapFirebaseUser(result.user);
+    const user = await fetchDriveUser(accessToken);
+    // A personal Google account must never be used for company Drive writes.
+    if (
+      config.domain &&
+      !(user.email ?? '').toLowerCase().endsWith(`@${config.domain.toLowerCase()}`)
+    ) {
+      oauth2.revoke(accessToken);
+      throw new Error(
+        `Connect a @${config.domain} Google account. ${user.email ?? 'That account'} can't be used for company Drive folders.`
+      );
+    }
+
     cachedAccessToken = accessToken;
-    cachedUser = userInfo;
-
-    if (authSuccessCallback) {
-      authSuccessCallback(userInfo, accessToken);
-    }
-
-    return { user: userInfo, accessToken };
+    cachedExpiresAt = Date.now() + (Number(resp.expires_in) || 3600) * 1000;
+    cachedUser = user;
+    authSuccessCallback?.(user, accessToken);
+    return { user, accessToken };
   } finally {
     isSigningIn = false;
   }
 }
 
-export async function logoutGoogleDrive(): Promise<void> {
-  cachedAccessToken = null;
-  cachedUser = null;
-  try {
-    if (getFirebaseConfig()) await signOut(getDriveAuth());
-  } catch {
-    // ignore signOut errors
-  }
-  if (authFailureCallback) {
-    authFailureCallback();
-  }
+/** True while the consent popup is open. */
+export function isDriveSigningIn(): boolean {
+  return isSigningIn;
 }
 
+export async function logoutGoogleDrive(): Promise<void> {
+  const token = cachedAccessToken;
+  clearGoogleDriveToken();
+  if (token) {
+    // Best effort: also revoke the token at Google so it can't be reused.
+    try {
+      (await loadGis()).revoke(token);
+    } catch {
+      // ignore: the local token is already dropped
+    }
+  }
+  authFailureCallback?.();
+}
 export function extractDriveFolderId(urlOrId?: string): string | null {
   if (!urlOrId) return null;
   const trimmed = urlOrId.trim();

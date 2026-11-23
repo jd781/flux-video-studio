@@ -22,23 +22,6 @@ RUN npm ci
 # App source.
 COPY . .
 
-# Firebase web config for the pipeline's "Connect Google Drive" popup. Vite inlines
-# VITE_* values into the frontend at build time, so pass them as build args:
-#   fly deploy --build-arg VITE_FIREBASE_API_KEY=... (see DEPLOY.md)
-# Left empty, the app still works with Drive features disabled. These are web
-# identifiers, not secrets.
-ARG VITE_FIREBASE_API_KEY=""
-ARG VITE_FIREBASE_AUTH_DOMAIN=""
-ARG VITE_FIREBASE_PROJECT_ID=""
-ARG VITE_FIREBASE_APP_ID=""
-ARG VITE_FIREBASE_STORAGE_BUCKET=""
-ARG VITE_FIREBASE_MESSAGING_SENDER_ID=""
-ENV VITE_FIREBASE_API_KEY=$VITE_FIREBASE_API_KEY \
-    VITE_FIREBASE_AUTH_DOMAIN=$VITE_FIREBASE_AUTH_DOMAIN \
-    VITE_FIREBASE_PROJECT_ID=$VITE_FIREBASE_PROJECT_ID \
-    VITE_FIREBASE_APP_ID=$VITE_FIREBASE_APP_ID \
-    VITE_FIREBASE_STORAGE_BUCKET=$VITE_FIREBASE_STORAGE_BUCKET \
-    VITE_FIREBASE_MESSAGING_SENDER_ID=$VITE_FIREBASE_MESSAGING_SENDER_ID
 # Build the frontend into /app/dist (served by the Express server in prod).
 RUN npm run build
 
